@@ -1,5 +1,5 @@
 from utils.data_structures import PatchTracingData
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 from collections import defaultdict
 def consolidate(V, F):
     # convert F to a set of unique vids

@@ -1,7 +1,7 @@
 
 from utils.mesh_utils import create_edge
 import numpy as np
-from utils.print import plot_mesh_with_trace
+from utils.print import print_if_verbose
 from utils.dijkstra import bfs
 from operations.internal_operations import split_edge_in_mesh_overloaded
 
@@ -68,7 +68,6 @@ def stitch_halfedges_same_patch(V,
                 # Add to trace0[i]'s adjacency list
                 connectivity.adj_list[trace0[i]].add(neighbor)
                 # Update neighbor's adjacency list to point to trace0[i] instead of trace1[i]
-                # if trace1[i] in connectivity.adj_list[neighbor]:
                 connectivity.adj_list[neighbor].remove(trace1[i])
                 connectivity.adj_list[neighbor].add(trace0[i])
         
@@ -98,7 +97,7 @@ def stitch_halfcorners_same_patch(V,
 
     Note: pre-splitting to prevent zero-area faces on merge is the caller's
     responsibility (it grows V, so the caller must keep any auxiliary V
-    structures — e.g. V_uv — in sync). See pre_split_halfcorners below.
+    structures — e.g. V_uv — in sync). See pre_split_halfcorners above.
     '''
     if len(halfcorner_vids) < 2:
         return halfcorner_vids[0] if halfcorner_vids else None
@@ -163,7 +162,7 @@ def stitch_periodic_edges(V_3d_list,
     Parameters
     ----------
     V_3d_list : list of 3D vertex positions (modified in place by stitching).
-    connectivity : ConnectivityData (F modified in place).
+    connectivity : ConnectivityMaintainance (F modified in place).
     u_periodic_edges, v_periodic_edges : list of (side0, side1) chain pairs.
 
     Returns
@@ -244,11 +243,6 @@ def stitch_periodic_edges_with_split(V_3d, connectivity_3d, u_periodic_edges, v_
     for (edges0, edges1) in v_periodic_edges:
         prohibited_vids_set.update(edges0)
         prohibited_vids_set.update(edges1)
-    # if singularity_edges is not None:
-    #     for idx, sing_edges in singularity_edges.items():
-    #         for e in sing_edges:
-    #             prohibited_vids_set.add(e[0])
-    #             prohibited_vids_set.add(e[1])
     merged_u_vertices = list()
     merged_u_sub_chains = []  # list of per-sub-chain merged vertex lists
     has_u = len(u_periodic_edges) > 0
@@ -429,8 +423,8 @@ def build_surface_merged_edges_with_apex(merged_u_sub_chains, merged_v_sub_chain
     # Sort interior apexes by parametric position
     u_iso_interior.sort(key=lambda x: x[0])
     v_iso_interior.sort(key=lambda x: x[0])
-    print(" !!!! the viso interior apex vids and their v positions are: ", v_iso_interior)
-    print(" !!!! the uiso interior apex vids and their u positions are: ", u_iso_interior)
+    print_if_verbose(f" !!!! the viso interior apex vids and their v positions are: {v_iso_interior}")
+    print_if_verbose(f" !!!! the uiso interior apex vids and their u positions are: {u_iso_interior}")
     # Build merged edges for each periodic direction
     for sub_chains, lower_apexes, interior_apexes, upper_apexes in [
         (merged_u_sub_chains, v_iso_lower, v_iso_interior, v_iso_upper),
@@ -476,7 +470,8 @@ def split_between_two_stitching_vertices(V,
                                         prohibited_vids: set = None):
     '''
     This function is called on two vertices that will be stitched together. 
-    If the two vertices have shortest path less than three edges, we will split the edges between them.
+    If the shortest path between the two vertices has fewer than four edges, we split the edges between them
+    until it has at least four.
    
     Note, when calling, we assume vid0 and vid1 are matched vertices that will be stitched. 
     The screening is also done in this function.
@@ -490,15 +485,10 @@ def split_between_two_stitching_vertices(V,
                       prohibited_vids)
     
     if not traced_vids:
-        # plot_mesh_with_trace(V,
-        #                      connectivity.F,
-        #                      vector_of_vids= list(prohibited_vids),
-        #                      points_list=[V[vid0], V[vid1]],)
-        #                      save_path="debug_no_path_between_stitching_vertices.png")
         raise ValueError(f"Stitching two vertices but no path found between {vid0} and {vid1}")
     
-    # we need three edges, so at least four vertices
-    # .__.__.__.
+    # we need at least four edges, so at least five vertices
+    # .__.__.__.__.
     if len(traced_vids) > 4:
         return
     # split all the edges between vid0 and vid1
@@ -553,11 +543,11 @@ def _split_edge_and_update_sing(V, connectivity, edge, sing_edges):
     edge_set = {edge[0], edge[1]}
     for idx, edges in sing_edges.items():
         for i, e in enumerate(edges):
-            print(f"Checking if singularity edge {e} in index {idx} needs update after splitting edge {edge}")
+            print_if_verbose(f"Checking if singularity edge {e} in index {idx} needs update after splitting edge {edge}")
             if {e[0], e[1]} == edge_set:
                 edges[i] = (e[0], new_vid)
                 edges.insert(i + 1, (new_vid, e[1]))
-                print(f"Updated singularity edge {e} to {(e[0], new_vid)} and {(new_vid, e[1])} in singularity index {idx} after splitting edge {edge}")
+                print_if_verbose(f"Updated singularity edge {e} to {(e[0], new_vid)} and {(new_vid, e[1])} in singularity index {idx} after splitting edge {edge}")
                 return
 
 def split_between_two_stitching_vertices_updating_sing(V,
@@ -579,10 +569,6 @@ def split_between_two_stitching_vertices_updating_sing(V,
                       prohibited_vids)
 
     if not traced_vids:
-        # plot_mesh_with_trace(V,
-        #                 connectivity.F,
-        #                 vector_of_vids= list(prohibited_vids),
-        #                 points_list=[V[vid0], V[vid1]],)
         raise ValueError(f"Stitching two vertices but no path found between {vid0} and {vid1}")
 
     if len(traced_vids) > 4:

@@ -2,6 +2,7 @@ import numpy as np
 import copy 
 from collections import defaultdict
 import igl
+from utils.print import print_if_verbose
 def update_edge_length_and_adjacency_list(V, newv_index, edge, edge_adjacent_faces, adjacency_list, edge_mapping_to_length, adj_list_copy_dict=None, modified_edge_set=None):
     """
     Updates connectivity data structures after splitting an edge.
@@ -67,7 +68,7 @@ def update_edge_length_and_adjacency_list(V, newv_index, edge, edge_adjacent_fac
     # Update edge lengths for the split edge
     old_len = edge_mapping_to_length.pop(original_edge_norm, None)
     if old_len is None:
-        print(f"Warning: edge {original_edge_norm} not found in edge_mapping_to_length.")
+        print_if_verbose(f"Warning: edge {original_edge_norm} not found in edge_mapping_to_length.")
         # If length is missing, compute from V
         old_len = np.linalg.norm(np.array(V[v0]) - np.array(V[v1]))
     
@@ -173,7 +174,6 @@ def compute_EF(F):
     for f, face in enumerate(F):
         for i in range(3):
             edge = create_edge(face[i], face[(i + 1) % 3])
-            # edge = frozenset([face[i], face[(i + 1) % 3]])
             if edge not in edge_to_face:
                 edge_to_face[edge] = []
             edge_to_face[edge].append(f)
@@ -193,7 +193,7 @@ def mesh_is_valid(F):
     # and all triagle have unique vertices 
     for i, face in enumerate(F):
         if len(set(face)) < 3:
-            print(f"Invalid face {i}: {face} has duplicate vertices.")
+            print_if_verbose(f"Invalid face {i}: {face} has duplicate vertices.")
             return False
     return True
 def topology_consistency(F, u_periodic_edges, v_periodic_edges):
@@ -214,6 +214,6 @@ def topology_consistency(F, u_periodic_edges, v_periodic_edges):
         expected_bnd_loops = 0
 
     if num_bnd_loops != expected_bnd_loops:
-        print(f"Topology inconsistency: Expected {expected_bnd_loops} boundary loops, but found {num_bnd_loops}.")
+        print_if_verbose(f"Topology inconsistency: Expected {expected_bnd_loops} boundary loops, but found {num_bnd_loops}.")
         return False
     return True

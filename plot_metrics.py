@@ -1,9 +1,3 @@
-import argparse
-import os
-
-import numpy as np
-import pandas as pd
-
 """
 Plot histograms from a CSV produced by get_metrics.py / get_distance.py
 (or any CSV with a mesh_id column and one or more numeric columns).
@@ -24,6 +18,11 @@ Examples:
     python plot_metrics.py -i metrics.csv -o plots --threshold-low num_faces=100
     python plot_metrics.py -i metrics.csv -o plots          # no thresholds, plain hists
 """
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
 
 
 def _set3_color(index):
@@ -339,7 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--color-seed", type=int, default=0,
                         help="Offset into the Plotly Set3 palette; consecutive metrics cycle through Set3 starting from this index.")
     parser.add_argument("--percent-axes", nargs="*", default=["hausdorff"],
-                        help="Column names to render with both axes in %. Values are multiplied by 100 on x; "
+                        help="Column names to render with both axes in %%. Values are multiplied by 100 on x; "
                              "y becomes percent of total. Default: hausdorff. Pass empty to disable.")
     parser.add_argument("--stage-bar", action="store_true",
                         help="Also emit stage_runtime_mean.<fmt> and stage_runtime_median.<fmt>: "

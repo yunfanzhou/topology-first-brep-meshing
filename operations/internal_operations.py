@@ -2,7 +2,7 @@ import numpy as np
 import igl
 import copy 
 from utils.mesh_utils import update_edge_length_and_adjacency_list, update_adjacency_list, create_edge, compute_VF
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 
 def split_edge_in_mesh_overloaded(V, connectivity, edge, new_point = None, faces = None):
     return split_edge_in_mesh(V, connectivity.F, edge, connectivity.VF, new_point, faces, connectivity.adj_list, connectivity.edge_set_to_length_mapping, connectivity.adj_list_copy_dict, connectivity.modified_edge_set)
@@ -22,40 +22,20 @@ def split_edge_in_mesh(V,
     # V: vertices of the mesh
     # F: faces of the mesh
     # edge: the edge to split
-    # Output:
-    # new_V: V after splitting the edge
-    # new_F: F after splitting the edge
-    # newF = [F]
-    # newV = [V]
-    # if faces is None:
-    #     faces = []
-    #     for f, face in enumerate(F):
-    #         if edge[0] in face and edge[1] in face:
-    #             faces.append(f)
-        # ev, fe, ef = igl.edge_topology(V, F)
-        # e = np.where((ev == tuple(sorted(edge))).all(axis=1))[0]
-        # faces = ef[e][0]
+    # VF: vertex-to-faces map; the faces to split are the ones shared by both edge vertices
+    # new_point: position of the new vertex (default: the edge midpoint)
+    # Output (V, F, VF and the connectivity structures are modified in place):
+    # V: V after splitting the edge
+    # F: F after splitting the edge
+    # adjacency_list, edge_mapping_to_length: the updated structures
     common_faces = set(VF[edge[0]]) & set(VF[edge[1]])
     faces = list(common_faces)
 
-    # # --- area debug ---
-    # def _face_area(verts_3d):
-    #     v = [np.array(verts_3d[i]) for i in range(3)]
-    #     return 0.5 * np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0]))
-    # areas_before = {f: _face_area([V[vid] for vid in F[f]]) for f in faces if f != -1}
-    # if any(a < 1e-15 for a in areas_before.values()):
-    #     print(f"!!!!!Error: {len(areas_before)} zero-area faces before splitting edge {edge}")
-    #     plot_mesh_with_trace(V, F, component_fids=list(areas_before.keys()))
-    #     raise ValueError(f"Error: {len(areas_before)} zero-area faces before splitting edge {edge}.")
-    # # --- end area debug ---
-
     if new_point is None:
         new_point  = (np.array(V[edge[0]]) + np.array(V[edge[1]])) / 2
-    newv_index = len(V)  # if V is numpy array
+    newv_index = len(V)
     
     V.append(new_point)
-    # newV = np.vstack([newV, new_point])
-    # newv_index = len(newV) - 1
     VF[newv_index] = [f for f in faces]
     edge_adjacent_faces = []
     for f in faces:
@@ -68,7 +48,7 @@ def split_edge_in_mesh(V,
         idx = {v: i for i, v in enumerate(face)}
 
         if edge[0] not in idx or edge[1] not in idx:
-            print(f"    Error: edge {edge} not found in face {face}")
+            print_if_verbose(f"    Error: edge {edge} not found in face {face}")
             continue
 
         index0, index1 = idx[edge[0]], idx[edge[1]]
@@ -100,16 +80,6 @@ def split_edge_in_mesh(V,
                                                                                        modified_edge_set)
     elif adjacency_list is not None:
         adjacency_list = update_adjacency_list( newv_index, edge, edge_adjacent_faces, adjacency_list)
-    # # --- area debug ---
-    # result_fids = list(areas_before.keys()) + [len(F) - len(faces) + i for i in range(len(faces))]
-    # result_fids = list(areas_before.keys()) + list(range(len(F) - len(faces), len(F)))
-    # areas_after = {f: _face_area([V[vid] for vid in F[f]]) for f in result_fids if f < len(F)}
-    # if any(a < 1e-16 for a in areas_after.values()):
-    #     print(f"[split_edge_in_mesh] ZERO-AREA after splitting edge {edge}")
-    #     print(f"  areas before: {areas_before}")
-    #     print(f"  areas after:  {areas_after}")
-    #     raise ValueError(f"ZERO-AREA after splitting edge {edge}.")
-    # # --- end area debug ---
     return V, F, adjacency_list, edge_mapping_to_length
 
 def compute_bary(V, face, point):
@@ -300,13 +270,15 @@ def embed_point_in_triangle(V, connectivity, point, frozen_edges_set, prohibited
 
 
 def split_1_to_3(V, connectivity, point, closest_fid=None):
-    # Insert a point into the mesh
+    # Insert a vertex at the centroid of a face, splitting it 1-to-3
     # Input:
     # V: vertices of the mesh
-    # F: faces of the mesh
-    # point: the position to insert
+    # connectivity: mesh connectivity (F, VF, adj_list, edge lengths), updated in place
+    # point: only used to find the closest face when closest_fid is None
+    # closest_fid: the face to split
     # Output:
     # inserted_vid: the vertex id that is inserted and traced
+    # closest_face: the vertices of the face that was split
     if closest_fid is None:
         V_np = np.array(V)
         F_np = np.array(connectivity.F)
@@ -318,13 +290,6 @@ def split_1_to_3(V, connectivity, point, closest_fid=None):
         closest_face = connectivity.F[closest_fid]
         new_point = (np.array(V[closest_face[0]]) + np.array(V[closest_face[1]]) + np.array(V[closest_face[2]])) / 3.
     # TODO We optimize the point to be the closest corner of the face if the triangle is not boundary triangle 
-    
-    # --- area debug ---
-    def _face_area_1to3(verts_3d):
-        v = [np.array(verts_3d[i]) for i in range(3)]
-        return 0.5 * np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0]))
-    area_before_1to3 = _face_area_1to3([V[closest_face[0]], V[closest_face[1]], V[closest_face[2]]])
-    # --- end area debug ---
 
     newV_index = len(V)
 
@@ -335,15 +300,6 @@ def split_1_to_3(V, connectivity, point, closest_fid=None):
     connectivity.F[closest_fid] = [closest_face[0], closest_face[1], newV_index]
 
     F_size = len(connectivity.F)
-
-    # # --- area debug ---
-    # new_fids = [closest_fid, F_size - 2, F_size - 1]
-    # areas_after_1to3 = {f: _face_area_1to3([V[vid] for vid in connectivity.F[f]]) for f in new_fids}
-    # if any(a < 1e-16 for a in areas_after_1to3.values()):
-    #     print(f"[split_1_to_3] ZERO-AREA after splitting face {closest_fid} (area before: {area_before_1to3})")
-    #     print(f"  areas after: {areas_after_1to3}")
-    #     raise ValueError(f"ZERO-AREA after split_1_to_3 on face {closest_fid}.")
-    # # --- end area debug ---
 
     connectivity.VF[newV_index] = [F_size - 2, F_size - 1, closest_fid]
     connectivity.VF[closest_face[0]].append(F_size - 1)
@@ -390,11 +346,6 @@ def collapse_nonmanifold_prevention(V,
                 split_edge_in_mesh_overloaded(V,
                                               connectivity,
                                               edge)
-                # da = igl.doublearea(np.array(V), np.array(connectivity.F))
-                # zero_area_faces = np.where(da < 1e-16)[0]
-                # if len(zero_area_faces) > 0:
-                #     print(f"!!!!!Error: has {len(zero_area_faces)} zero-area faces after spliting edge in mesh overloaded.")
-                #     plot_mesh_with_trace(V, connectivity.F, component_fids=zero_area_faces)
 
     # check link condition once more 
     vertices_breaking_link_condition = edge_link_condition(connectivity, collapsing_edge)
@@ -429,12 +380,11 @@ def safe_collapse_with_frozen_edges(V,
                                    collapse_to_vid = None,
                                    frozen_edge_set = None):
     # Collapse an edge in the mesh
-    # if force collapse is true, but faile din link condition, we try split the edges that break link condition
-    # however, this might not always work, sine edges that break link ocndition can be frozen edge. 
+    # If the edge fails the link condition, we first split the edges that break it.
+    # However, this might not always work, since edges that break the link condition can be frozen edges.
 
-     # get all the triangles that contain the points in the boundary loop
-    # Separate the triangles that contain the boudnary edges to the will_delete set 
-    # Add the ones that only contain one vertex of the boundary loop to will_edit set
+    # Triangles that contain both vertices of the collapsing edge go to the will_delete set;
+    # the ones that contain only one of them go to the will_edit set.
     collapse_nonmanifold_prevention(V, 
                                     connectivity, 
                                     collapsing_edge,
@@ -451,21 +401,8 @@ def safe_collapse_with_frozen_edges(V,
             will_edit.add(i)
 
     if len(will_delete) == 0 and len(will_edit) == 0:
-        print("No triangles to edit or delete for forming cone. Returning None.")
+        print_if_verbose("No triangles to edit or delete for forming cone. Returning None.")
         return None
-
-    # # --- area debug: capture areas of affected faces before collapse ---
-    def _face_area_collapse(verts_3d):
-        v = [np.array(verts_3d[i]) for i in range(3)]
-        return 0.5 * np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0]))
-    # affected_fids = will_delete | will_edit
-    # areas_before_collapse = {f: _face_area_collapse([V[vid] for vid in connectivity.F[f]]) for f in affected_fids}
-    # V_before_collapse = [list(v) for v in V]
-    # F_before_collapse = [list(f) for f in connectivity.F]
-    # if any(a < 1e-13 for a in areas_before_collapse.values()):
-    #     print(f"!!!!!Error: {len(areas_before_collapse)} zero-area faces before collapsing edge {collapsing_edge}")
-    #     raise ValueError(f"Error: {len(areas_before_collapse)} zero-area faces before collapsing edge {collapsing_edge}.")
-    # # --- end area debug ---
 
     # edit the triangles that contain the collapsing vids
     if collapse_to_vid is None:
@@ -528,6 +465,6 @@ def safe_collapse_with_frozen_edges(V,
 
 
     if igl.is_edge_manifold(np.array(connectivity.F)) == False:
-        print_if_verbose(f"After collapsing, the mesh is not edge manifold.")
-        raise Exception(f"After collapsing, the mesh is not edge manifold.")
+        print_if_verbose("After collapsing, the mesh is not edge manifold.")
+        raise Exception("After collapsing, the mesh is not edge manifold.")
     return collapse_to_vid

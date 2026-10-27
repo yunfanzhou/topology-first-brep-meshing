@@ -1,5 +1,7 @@
 # Topology-First B-Rep Meshing
 
+[![CI](https://github.com/yunfanzhou/topology-first-brep-meshing/actions/workflows/ci.yml/badge.svg)](https://github.com/yunfanzhou/topology-first-brep-meshing/actions/workflows/ci.yml)
+
 Triangle meshing of B-rep CAD models that preserves the model's topology: every B-rep face becomes a
 patch of triangles, every B-rep edge a chain of mesh edges, and every B-rep vertex a mesh vertex.
 The pipeline has two stages:
@@ -12,7 +14,7 @@ The pipeline has two stages:
 
 ## Install
 
-Python 3.11:
+Python 3.11 (abs-hdf5 has no packages for newer versions):
 
 ```
 pip install -r requirements.txt
@@ -23,13 +25,20 @@ geodesic tracing between points on faces and edges. It is built from source, so 
 The PyPI release of pygeodesic does not work with this pipeline; `main.py` stops with an ImportError if it
 is installed.
 
-Prebuilt macOS arm64 binaries of the two C++ tools the pipeline calls are in `bin/macos-arm64/`:
-`mmg2d_O3` (forward stage) and `remeshing_app` (remeshing stage). On other platforms, build them and pass
-their paths:
+The two C++ tools the pipeline calls:
 
-- Mmg: https://github.com/MmgTools/mmg, then `main.py --mmg2d_path <path to mmg2d_O3>`
-- wildmeshing-toolkit, branch `fpir`: https://github.com/wildmeshing/wildmeshing-toolkit, configured with
-  `-DWMTK_APP_SEC=ON`, target `remeshing_app`; then `remeshing/remesh.py --app <path to remeshing_app>`
+- `mmg2d_O3` (forward stage, Mmg 5.8.0) comes with the mmgpy package in `requirements.txt`; `main.py` finds
+  it there. `--mmg2d_path` selects another build.
+- `remeshing_app` (remeshing stage, wildmeshing-toolkit, branch `fpir`) is built from source with the
+  `CMakeLists.txt` at the root of the repository, which downloads wildmeshing-toolkit and its dependencies:
+  ```
+  cmake -S . -B build
+  cmake --build build --config Release
+  ```
+  This needs git, CMake 3.20 or later and a C++17 compiler, plus GMP on Linux (`apt install libgmp-dev`)
+  and macOS (`brew install gmp`); on Windows, wildmeshing-toolkit downloads GMP itself. The build (about 3
+  minutes on a 16-core laptop) puts `remeshing_app` in `build/bin/`, where `remeshing/remesh.py` looks for
+  it; `--app` selects another build. If a download fails, run the build command again: it resumes.
 
 ## Run
 
@@ -72,13 +81,27 @@ plus `result.json` (per-face status and timings). The remeshing stage adds
 - `plot_metrics.py`: histograms of the CSVs those two write
 - `parse_results.py`: success and timing summary of a batch of `result.json` files
 
+For example, on the outputs of all models in `data/simple` (each in `out/<model>`):
+
+```
+python get_distance.py -i out --cad-root data/simple -o out/distance.csv
+python get_metrics.py -i out -o out/metrics.csv
+python plot_metrics.py -i out/metrics.csv out/distance.csv -o out/plots --format html
+python parse_results.py out
+```
+
+`plot_metrics.py` writes PNG by default, which needs `pip install kaleido`; `--format html` does not.
+
 ## Tests
 
 ```
 pytest tests
 ```
 
+CI (`.github/workflows/ci.yml`) runs the tests on Linux, macOS and Windows, builds `remeshing_app`, and
+runs both stages, the topology check and the evaluation scripts on every model in `data/simple`.
+
 ## License
 
-MIT, see `LICENSE`. The binaries in `bin/` are third-party software under their own licenses (Mmg and GMP
-are LGPL-3.0); see `third_party/README.md`.
+MIT, see `LICENSE`. The C++ tools the pipeline calls are third-party software under their own licenses
+(Mmg is LGPL-3.0); see `third_party/README.md`.

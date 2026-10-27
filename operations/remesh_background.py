@@ -8,8 +8,8 @@ metric length corresponds to a 3D edge length of L.
 Iterative error refinement
 --------------------------
 After each MMG pass the per-triangle approximation error is computed.  Where
-max(tri_errors) > target_error the factor is multiplied by
-max(tri_errors) / target_error (exploiting the h² error scaling) and MMG is
+the average triangle error exceeds target_error the factor is multiplied by
+avg_error / target_error (exploiting the h² error scaling) and MMG is
 run again on the new mesh.  This repeats until the error is within budget or
 max_iterations is reached.
 """
@@ -21,10 +21,8 @@ import os
 from typing import Dict, List, Optional, Tuple
 from utils.mesh_utils import compute_VF, create_edge
 from operations.align import _get_boundary_edges
-from utils.print import plot_mesh_with_trace, print_if_verbose, dump_oversized_patch_state
+from utils.print import print_if_verbose, dump_oversized_patch_state
 GEOM_TOL = 1e-10
-STRIP_WIDTH_RATIO = 0.01
-SAME_VERTEX_TOL = 1e-8
 # ---------------------------------------------------------------------------
 # Medit .mesh file I/O
 # ---------------------------------------------------------------------------
@@ -120,21 +118,6 @@ def write_medit_sol(
                 e, f, g = 1.0, 0.0, 1.0
             fh.write(f"{factor * e:.17g} {factor * f:.17g} {factor * g:.17g}\n")
         fh.write("\nEnd\n\n")
-def write_medit_sol_scalar(path: str, h_values: np.ndarray):
-    """Write a scalar (isotropic) size map in Medit .sol format.
-
-    Each vertex gets a single target edge length in UV space.
-    MMG will create edges approximately this length at each vertex.
-    """
-    nv = len(h_values)
-    with open(path, "w") as fh:
-        fh.write("MeshVersionFormatted 2\n\n")
-        fh.write("Dimension 2\n\n")
-        fh.write(f"SolAtVertices\n{nv}\n")
-        fh.write("1 1\n")  # 1 solution of type 1 (scalar)
-        for i in range(nv):
-            fh.write(f"{h_values[i]:.17g}\n")
-        fh.write("\nEnd\n")
 
 
 def read_medit_mesh(path: str) -> Tuple[np.ndarray, np.ndarray, Dict[int, List[Tuple[int, int]]]]:
@@ -252,7 +235,7 @@ def compute_segment_approximation_errors(
 
 
 # ---------------------------------------------------------------------------
-# Edge meshing: optimal split point via Newton's method
+# Edge meshing: optimal split point via dense sampling
 # ---------------------------------------------------------------------------
 
 def find_max_error_parameter(curve, t0, t1, p0, p1):
@@ -288,15 +271,13 @@ def refine_edge_mesh(
     """Iteratively refine a curve discretisation by splitting segments at the
     point of maximum approximation error.
 
-    Uses quadrature-based error metric and Newton's method to find optimal
+    Uses a quadrature-based error metric and a dense sample sweep to find the
     split locations (see ``find_max_error_parameter``).
 
     Parameters
     ----------
     curve : abs curve object with ``.sample()``, ``.derivative()``, ``.interval``.
-    target_3d_length : desired max 3D segment length (as fraction of curve
-        bounding-box diagonal; scaled internally).
-    target_error : max allowed approximation error (as fraction of bbox diagonal).
+    target_error : max allowed per-segment approximation error [3D length units].
     max_iterations : maximum refinement passes.
     initial_segments : number of uniform segments to start with.
 
@@ -341,7 +322,6 @@ def refine_edge_mesh(
 def mmg_remesh(
     V: np.ndarray,
     F: np.ndarray,
-    h_values: Optional[np.ndarray] = None,
     EE: Optional[np.ndarray] = None,
     FF_m: Optional[np.ndarray] = None,
     GG: Optional[np.ndarray] = None,
@@ -352,7 +332,7 @@ def mmg_remesh(
     required_vertices: Optional[List[int]] = None,
     required_edges: Optional[List[Tuple[int, int]]] = None,
     nosizreq: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, Dict[int, List[Tuple[int, int]]]]:
     """Run MMG2D remeshing via the CLI.
 
     Parameters
@@ -366,6 +346,8 @@ def mmg_remesh(
     -------
     V_out : (nv_out, 2) remeshed vertices.
     F_out : (nf_out, 3) remeshed triangles (0-based).
+    tagged_edges : {tag: [(v0, v1), ...]} — 0-based output edges grouped by
+        Medit reference tag.
     """
     tmpdir = tempfile.mkdtemp()
     try:
@@ -377,10 +359,7 @@ def mmg_remesh(
                          feature_edges=feature_edges,
                          required_vertices=required_vertices,
                          required_edges=required_edges)
-        if EE is not None:
-            write_medit_sol(sol_in, EE, FF_m, GG, metric_factor)
-        else:
-            write_medit_sol_scalar(sol_in, h_values)
+        write_medit_sol(sol_in, EE, FF_m, GG, metric_factor)
 
         cmd = [
             mmg2d_path,
@@ -424,15 +403,13 @@ def stitch_singularity_fans_3d(
 ) -> Tuple[list, list, dict]:
     """Create fan triangles connecting singularity strip boundaries to apex vertices.
 
-    Identifies hole-boundary edges (boundary edges NOT on a non-periodic domain
-    line), assigns each to the nearest singularity by 3D midpoint, then builds
-    fan triangles to the singularity apex.
+    For each singularity, adds an apex vertex at its 3D point and builds fan
+    triangles from that singularity's strip-boundary edges to the apex.
 
     Parameters
     ----------
-    u_periodic, v_periodic : whether the u/v is periodic 
-    padding_ratio : float, optional
-        The ratio of the domain width to use for padding when matching strip boundaries.
+    sing_edges : dict mapping singularity index → list of (a, b) strip-boundary
+        edges (vertex ids into V_3d / F_3d).
 
     Returns
     -------
@@ -451,14 +428,7 @@ def stitch_singularity_fans_3d(
     open_edges = _get_boundary_edges(F_3d)
     fanned = set()
 
-    # 2. Build VF (vertex → faces) for boundary-edge vertices only.
-    edge_vids = set()
-    for edges in sing_edges.values():
-        for a, b in edges:
-            edge_vids.add(a)
-            edge_vids.add(b)
-
-    # 3. Per singularity: insert 3D center vertex, create fan triangles.
+    # Per singularity: insert 3D center vertex, create fan triangles.
     for idx, edges in sing_edges.items():
         if not edges:
             continue
@@ -522,10 +492,10 @@ def compute_first_fundamental_form(
 # error. The discretization (mesh triangles, edge chords) must deviate from the
 # true surface by strictly less than R_min = 1/|kappa|_max — the surface's
 # local reach — or closest-point projection becomes many-to-one and distinct
-# nearby features alias onto the same region (torus band, 23226 patch 66).
+# nearby features alias onto the same region (e.g. on a torus band).
 # 0.5 (half the reach) prevents the aliasing catastrophe but still allows
 # 120-degree arc elements — too lax for stable closest-point/trace
-# localization: on 22832 patch 259 (cylinder r=1.55) it gave 3 elements per
+# localization: on a cylinder face (r=1.55) it gave 3 elements per
 # circumference and element-ridge projection ambiguity broke the embedded
 # feature chains (0.1 gave 18 triangles and zero interior breaks there).
 # 0.2 (sag <= 20% of R, ~5 elements per full circle) is the working
@@ -544,8 +514,8 @@ def max_principal_curvature(surface, uv_points: np.ndarray) -> Optional[np.ndarr
     d1 = surface.derivative(uv, order=1)   # (n, 3, 2)
     # Temporary guard until abs is fixed: returns None when the kernel has no
     # second derivative. scipy raises ValueError for B-splines whose interior
-    # knots repeat up to the degree (a kink: 00009595 face 3, extrusion of a
-    # cubic profile with knot 1 repeated 3 times), and abs's Offset returns None.
+    # knots repeat up to the degree (a kink, e.g. the extrusion of a cubic
+    # profile with an interior knot repeated 3 times), and abs's Offset returns None.
     try:
         d2 = surface.derivative(uv, order=2)   # (n, 3, 2, 2)
     except ValueError as e:
@@ -563,7 +533,7 @@ def max_principal_curvature(surface, uv_points: np.ndarray) -> Optional[np.ndarr
     # Degeneracy tests — a sample only votes on curvature if its tangent pair
     # is well conditioned. Two independent failure modes:
     #  * collapsed tangent magnitude (parametric pole: a whole domain edge
-    #    maps to one 3D point, |s_v| ~ 1e-15 — 23226 faces 403/408). Real
+    #    maps to one 3D point, |s_v| ~ 1e-15). Real
     #    anisotropy is ~20:1 here; 1e-8 relative is far below any real ratio.
     #  * collapsed tangent angle: det(I)/(E*G) = sin^2(angle).
     # Rejected samples report kappa = 0 ("no opinion"); R_min comes from the
@@ -769,11 +739,11 @@ def compute_triangle_approximation_errors(
         i0, i1, i2 = F[fi]
         uv0, uv1, uv2 = V_uv[i0], V_uv[i1], V_uv[i2]
 
-        # Skip degenerate UV triangles (mirrors BarycentricTriangle::is_degenerate)
+        # Degenerate UV triangles raise (test mirrors BarycentricTriangle::is_degenerate)
         e1 = uv1 - uv0
         e2 = uv2 - uv0
         if abs(e1[0] * e2[1] - e1[1] * e2[0]) < 1e-15:
-            print(f"Warning: degenerate UV triangle at index {fi} with vertices {uv0}, {uv1}, {uv2}")
+            print_if_verbose(f"Warning: degenerate UV triangle at index {fi} with vertices {uv0}, {uv1}, {uv2}")
             raise Exception(f"COMPUTE TRIANGLE ERROR: Degenerate UV triangle at index {fi} with vertices {i0}, {i1}, {i2}")
 
         # Quadrature points in actual UV space via barycentric interpolation
@@ -797,16 +767,11 @@ def compute_triangle_approximation_errors(
 # ---------------------------------------------------------------------------
 
 def compute_edge_length_metric(V, F, surface):
-    """Compute the edge length metric for each triangle edge.
-
-    For an edge from vertex i to j, we estimate the 3D length of the curve
-    on the surface between V[i] and V[j] and use that as the target length for
-    that edge in UV space.  This is a more accurate version of the FFF-based
-    metric that accounts for curvature along edges.
+    """3D chord length of each triangle edge (UV vertices lifted by ``surface``).
 
     Returns
     -------
-    edge_lengths : (nf, 3) target UV edge lengths for each triangle edge.
+    edge_lengths : (nf, 3) 3D lengths of the edges i0→i1, i1→i2, i2→i0 of each triangle.
     """
     nf = F.shape[0]
     edge_lengths = np.zeros((nf, 3))
@@ -847,7 +812,6 @@ def remesh_with_error_and_edge_metric(
     surface : surface object with ``.sample()`` and ``.derivative()``.
     V_uv : (nv, 2) UV vertex positions of the initial mesh.
     F : (nf, 3) triangle connectivity (0-based).
-    target_3d_length : desired 3D edge length (as fraction of bbox diagonal).
     target_error : if given, iterate until avg triangle approximation error
         is within this threshold.
     hgrad : MMG gradation parameter.
@@ -863,12 +827,12 @@ def remesh_with_error_and_edge_metric(
     # Stagnation thresholds (rationale, not tunables):
     #   STAGNATION_RATIO = 0.9 — an iteration that fails to reduce avg_error
     #     by at least 10% counts as no progress.  Wider than the ~1.6% noise
-    #     observed when mmg can't follow the requested factor (e.g. surface
-    #     042 in 22345_bc482c26/assembly.hdf5: avg_error stayed in
-    #     [2.808, 2.855] across 9 iterations while factor scaled by ~15^9).
-    #   STAGNATION_LIMIT = 2 — one stagnant iteration could be a coincidence
+    #     observed when mmg can't follow the requested factor (on one surface
+    #     avg_error stayed in [2.808, 2.855] across 9 iterations while factor
+    #     scaled by ~15^9).
+    #   STAGNATION_LIMIT = 5 — one stagnant iteration could be a coincidence
     #     (mmg producing a slightly different connectivity at the same
-    #     effective h); two in a row signals a structural inability to
+    #     effective h); five in a row signals a structural inability to
     #     refine, so further factor scaling is wasted work.
     STAGNATION_RATIO = 0.9
     STAGNATION_LIMIT = 5
@@ -878,10 +842,11 @@ def remesh_with_error_and_edge_metric(
     prev_avg_error: Optional[float] = None
     stagnation_count = 0
 
-    # mmg RuntimeError, degenerate-UV-triangle exceptions from
-    # compute_triangle_approximation_errors, and stagnation are all
-    # surfaced to the caller; run_initial_meshing_for_face's outer
-    # try/except routes them to the insert_feature_edges_uv fallback.
+    # mmg RuntimeError and degenerate-UV-triangle exceptions from
+    # compute_triangle_approximation_errors propagate to the caller;
+    # run_initial_meshing_for_face's outer try/except routes them to the
+    # insert_feature_edges_uv fallback. Stagnation is not an error: the
+    # loop stops and returns the current mesh and factor.
     for it in range(max_iterations):
         EE, FF_m, GG = compute_first_fundamental_form(surface, V_cur)
         print_if_verbose(f"\n ---Initial remesh Iteration {it} ---")
@@ -949,12 +914,16 @@ def insert_feature_edges_uv(
     base_factor: Optional[float] = None,
     local_finer_ratio: float = 10.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Iteratively refine the UV mesh near feature edges.
+    """Refine the UV mesh near feature edges (two MMG passes).
 
-    Each iteration: compute per-vertex average 3D edge length, find vertices
-    within an influence radius of feature edge points, halve their UV size
-    map, and re-run MMG.  Stops when 3D edges in the influence region are
-    shorter than ``0.1 * target_3d_length``, or after ``max_iterations``.
+    Collects the 3D feature-edge points (polyline vertices plus one
+    interpolated midpoint per segment), then:
+
+    1. remeshes the whole patch uniformly at a 3D edge length equal to the
+       median feature-point spacing;
+    2. if several feature points project (via nearest face centroid) onto the
+       same triangle, remeshes once more with the metric scaled up around
+       those triangles by their point count.
 
     Parameters
     ----------
@@ -962,14 +931,9 @@ def insert_feature_edges_uv(
     F : (nf, 3) triangle connectivity from remeshing (0-based).
     face : abs Face object with ``.loops``, ``.surface``.
     edge_geometry_data : dict mapping edge_id -> (n, 3) refined 3D polyline.
-    target_3d_length : desired 3D edge length as fraction of bbox diagonal
-        (same convention as ``remesh_with_error_and_edge_metric``).
     mmg2d_path : path to the mmg2d executable.
-    max_iterations : maximum refinement iterations.
-    base_factor : baseline tensor factor (if None, recomputed from current mesh).
-    local_finer_ratio : number of hallucinated (interpolated) points to
-        insert between each pair of consecutive feature edge vertices.
-        More points -> denser coverage -> finer mesh near features.
+    target_3d_length, max_iterations, base_factor, local_finer_ratio : unused;
+        the baseline metric always comes from the feature-point spacing.
 
     Returns
     -------
@@ -1657,7 +1621,7 @@ def refine_cdt_with_size_field(
 
     # Stage 2 (Triangle 'rpa' interior scaffolding) removed: Ruppert's
     # encroachment rule splits constrained segments at midpoints with no
-    # lower bound, and near-coincident feature chords (22162 patch 79) drive
+    # lower bound, and near-coincident feature chords can drive
     # it to ~1e-12 required edges that send mmg2d into an infinite collapse
     # loop. The interior refinement it provided is scaffolding only — the
     # MMG loop right after applies the same size field and inserts interior
@@ -1666,7 +1630,7 @@ def refine_cdt_with_size_field(
     if splits:
         # _split_mesh_edges_at_points keeps the mesh conforming but produces
         # zero/negative-area triangles when the vertex opposite a split
-        # segment is (nearly) collinear with it (22832 patch 259: 7 inverted
+        # segment is (nearly) collinear with it (on one face, 7 inverted
         # + 17 near-zero fan triangles -> mmg2d infinite loop). Discard the
         # fan connectivity and rebuild it with a plain constrained Delaunay
         # triangulation of the SAME vertices and SAME constrained segments:

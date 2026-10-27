@@ -7,7 +7,7 @@ import numpy as np
 import igl
 from utils.mesh_utils import compute_VF, adjacency_list, create_edge
 from utils.regular_space import regular_space_internal_on_entire_loop
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 
 def regular_space_on_boundary_edges(V, F, prohibited_vids=None, frozen_edge_set=None):
     ''' If there is edge between any non-adjacent boundary vertices pair, we split this edge.
@@ -27,7 +27,7 @@ def regular_space_on_boundary_edges(V, F, prohibited_vids=None, frozen_edge_set=
 
 def fuse_meshing(patch_to_V, patch_to_connectivity, patch_to_aggregated_tracing_data, result_log=None):
     '''Fuse the meshing results into a single mesh. 
-    Input: patch_to_V, patch_to_F, patch_to_feature_edge_bnd_index, patch_to_inserted_corners
+    Input: patch_to_V, patch_to_connectivity, patch_to_aggregated_tracing_data, result_log (optional, receives vertex-mismatch warnings)
     Output: V, F, patch_to_fids, feature_edge_id_to_vids, corner_id_to_vids
     '''
     
@@ -68,7 +68,7 @@ def fuse_meshing(patch_to_V, patch_to_connectivity, patch_to_aggregated_tracing_
         for feature_edge_id, vids in feature_edge_bnd_index.items():
             if len(vids) < 1:
                 print_if_verbose(f"Feature edge {feature_edge_id} in patch {patch_id} has less than 1 vertices.")
-                raise ValueError(f"Fusing: Feature edge {feature_edge_id} in patch {patch_id} has less than 2 vertices.")
+                raise ValueError(f"Fusing: Feature edge {feature_edge_id} in patch {patch_id} has less than 1 vertices.")
             if feature_edge_id not in feature_edge_id_to_global_vids.keys():
                 feature_edge_id_to_global_vids[feature_edge_id] = [vid + len(V_final) for vid in vids ]
                 
@@ -108,29 +108,7 @@ def fuse_meshing(patch_to_V, patch_to_connectivity, patch_to_aggregated_tracing_
                     result_log.add_warning("fusing", f"Vertex {local_vid} in patch {patch_id} does not match.", patch_id=patch_id)
                 print_if_verbose(f"    Error: local_vid {local_vid} V[local_vid] {V[local_vid]} global vid is  {global_vid} V_final[global_vid] {V_final[global_vid]}")
     # consolidate
-    # da = igl.doublearea(np.array(V_final), np.array(F_final))
-    # zero_area_faces = np.where(da == 0)[0]
-    # if len(zero_area_faces) > 0:
-    #     # raise ValueError(f"Fusing: Fused mesh has {len(zero_area_faces)} zero-area faces before consolidation")
-    #     pass
-    # ia = igl.internal_angles(np.array(V_final), np.array(F_final))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) == 0)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     # raise ValueError(f"Fusing: Fused mesh has {len(zero_min_angle_faces)} zero-min-angle faces before consolidation")
-        # pass
-
     V_consolidate, F_consolidate, old2new, new2old = consolidate(V_final, F_final)
-
-    # da = igl.doublearea(np.array(V_consolidate), np.array(F_consolidate))
-    # zero_area_faces = np.where(da == 0)[0]
-    # if len(zero_area_faces) > 0:
-    #     # raise ValueError(f"Fusing: Fused mesh has {len(zero_area_faces)} zero-area faces after consolidation")
-    #     pass
-    # ia = igl.internal_angles(np.array(V_consolidate), np.array(F_consolidate))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) == 0)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     # raise ValueError(f"Fusing: Fused mesh has {len(zero_min_angle_faces)} zero-min-angle faces after consolidation")
-    #     pass
 
     for feature_edge_id, vids in feature_edge_id_to_global_vids.items():
         feature_edge_id_to_global_vids[feature_edge_id] = [old2new[vid] for vid in vids]
@@ -141,8 +119,8 @@ def fuse_meshing(patch_to_V, patch_to_connectivity, patch_to_aggregated_tracing_
 def main():
     parser = argparse.ArgumentParser(description="Load and process a pkl file.")
     parser.add_argument("input_file", type=str, help="Path to the pkl file")
-    parser.add_argument("output_folder", type=str, help="Path to the output pickle file")
-    parser.add_argument("--verbose", type=bool, default=False, help="Whether to print verbose logs")
+    parser.add_argument("output_folder", type=str, help="Folder to write fused.pkl into")
+    parser.add_argument("--verbose", type=int, default=0, help="Print verbose logs when non-zero")
 
     args = parser.parse_args()
     config.verbose = args.verbose

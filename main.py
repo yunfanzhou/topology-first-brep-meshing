@@ -1,8 +1,10 @@
+import importlib.util
 import os
-import platform
+import shutil
 from os.path import exists
 from run_one_patch import local_step_one_patch
 from initial_meshing import (
+    CollapsedInteriorIsoLineError,
     create_feature_edge_geometry_data,
     run_initial_meshing_for_face,
     build_singularity_data_from_face,
@@ -24,6 +26,21 @@ from datetime import datetime
 ATTEMPT_MAX = 3
 # Fewer faces than this to mesh: serial (worker start-up costs ~1 s).
 PARALLEL_MIN_FACES = 16
+
+
+def default_mmg2d_path():
+    """mmg2d_O3 of the mmgpy package (requirements.txt) if installed, else mmg2d_O3 on PATH.
+
+    The mmg2d_O3 command mmgpy installs is a Python launcher, which would start an interpreter for
+    every mmg call, so the executable inside the package is called directly.
+    """
+    spec = importlib.util.find_spec("mmgpy")
+    if spec is not None and spec.submodule_search_locations:
+        exe = os.path.join(spec.submodule_search_locations[0], "bin",
+                           "mmg2d_O3.exe" if os.name == "nt" else "mmg2d_O3")
+        if exists(exe):
+            return exe
+    return "mmg2d_O3"
 
 
 def form_per_patch_summary():
@@ -103,7 +120,7 @@ def mesh_one_face(face, edge_geometry_data, all_corners, target_error, mmg2d_pat
 _WORKER = {}
 
 
-def _worker_init(abs_file, part_index, edge_geometry_path, verbose):
+def _worker_init(abs_file, part_index, edge_geometry_path, verbose, oversized_dump_dir):
     # Only paths cross the pipe: a large payload here makes the parent block on each worker's start-up.
     from abs import read_parts
     part = read_parts(abs_file)[part_index]
@@ -111,6 +128,7 @@ def _worker_init(abs_file, part_index, edge_geometry_path, verbose):
     _WORKER["edge_geometry_data"] = atomic_load(edge_geometry_path)["edge_geometry_data"]
     _WORKER["all_corners"] = build_corner_data_from_abs_part(part)
     config.verbose = verbose
+    config.oversized_dump_dir = oversized_dump_dir
 
 
 def _worker_mesh_face(face_id, target_error, mmg2d_path, diag_bbox):
@@ -128,21 +146,24 @@ def main():
                         help="Directory where results and checkpoints are written")
     parser.add_argument("--error_rel", type=float, default=1e-3,
                         help="Relative target error with respect to the model bounding box diagonal (default: 1e-3)")
-    bundled_mmg2d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "macos-arm64", "mmg2d_O3")
-    use_bundled = exists(bundled_mmg2d) and platform.system() == "Darwin" and platform.machine() == "arm64"
-    parser.add_argument("--mmg2d_path", type=str, default=bundled_mmg2d if use_bundled else "mmg2d_O3",
-                        help="Path to mmg2d executable (default: the bundled macOS arm64 binary, else mmg2d_O3 on PATH)")
-    
+    parser.add_argument("--mmg2d_path", type=str, default=None,
+                        help="Path to the mmg2d executable (default: the one of the mmgpy package, else mmg2d_O3 on PATH)")
     parser.add_argument("--part", type=int, default=0,
                         help="Part index within the ABS file (default: 0)")
     parser.add_argument("--patch", type=int, default=None,
-                        help="If specified, only process the face with this id")
+                        help="If specified, only run the local step of the face with this id (no alignment or fusion)")
     parser.add_argument("--verbose", type=int, default=0)
-    parser.add_argument("--resume", type=bool, default=False)
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse the checkpoints of a previous run in output_folder")
     parser.add_argument("--workers", type=int, default=os.cpu_count() or 1,
                         help="Processes for the per-face local step (default: CPU count; 1 = serial). "
                              "The output does not depend on it.")
     args = parser.parse_args()
+    if args.mmg2d_path is None:
+        args.mmg2d_path = default_mmg2d_path()
+    if shutil.which(args.mmg2d_path) is None:
+        parser.error(f"mmg2d executable not found: {args.mmg2d_path} (pip install -r requirements.txt, "
+                     "or pass --mmg2d_path)")
 
     os.makedirs(args.output_folder, exist_ok=True)
     ckpt_folder = Path(args.output_folder) / "checkpoints"
@@ -151,6 +172,7 @@ def main():
 
     if args.verbose:
         config.verbose = args.verbose
+    config.oversized_dump_dir = os.path.join(args.output_folder, "oversized_patch_dumps")
 
     if exists(result_json) and not args.resume:
         os.remove(result_json)
@@ -192,7 +214,7 @@ def main():
         # Feature edge → adjacent face ids (needed by global alignment)
         feature_edge_to_patches = build_feature_edge_to_patches_from_abs_part(part)
 
-        result_log.set_total_patches(len(part.Solid.faces))
+        result_log.set_total_patches(1 if args.patch is not None else len(part.Solid.faces))
 
         # ------------------------------------------------------------------
         # Local step: initial meshing + tracing + linear solve
@@ -208,9 +230,6 @@ def main():
         global_align_ckpt = ckpt_folder / "global_alignment.pkl"
         fuse_dir = Path(args.output_folder) / "fused.pkl"
 
-        patch_error_sum = 0.0
-        patch_boundary_vertex_count = 0
-        patch_max_error = 0.0
         if len(part.Solid.faces) == 0:
             raise Exception(" EMPTY_MODEL")
         if (global_align_ckpt.exists() or fuse_dir.exists()) and args.resume:
@@ -231,10 +250,11 @@ def main():
                     patch_to_tracing_data[patch_id] = data["tracing"]
                     continue
                 todo.append(face)
+            if args.patch is not None and not todo and args.patch not in patch_to_V:
+                raise ValueError(f"No face with id {args.patch} in part {args.part}")
 
             def finish_patch(r):
                 """Record one face's result (in face order); raise on failure."""
-                nonlocal patch_error_sum, patch_boundary_vertex_count, patch_max_error
                 patch_id = r["patch_id"]
                 if not r["ok"]:
                     result_log.patch_failed(
@@ -243,12 +263,6 @@ def main():
                         detail=r["error"],
                         attempts=r["attempts"])
                     raise ValueError(f"Failed to process patch {patch_id} after {ATTEMPT_MAX} attempts: {r['error']}")
-                summary = r["summary"]
-                if summary["max_error"] is not None and summary["max_error"] > patch_max_error:
-                    patch_max_error = summary["max_error"]
-                if summary["avg_error"] is not None:
-                    patch_error_sum += summary["avg_error"] * summary["number_of_boundary_vertices"]
-                patch_boundary_vertex_count += summary["number_of_boundary_vertices"]
                 result_log.patch_done(patch_id, r["duration"], attempts=r["attempts"])
                 patch_to_tracing_data[patch_id] = r["tracing"]
                 patch_to_V[patch_id] = r["V"]
@@ -273,11 +287,16 @@ def main():
                                          mp_context=mp.get_context("spawn"),
                                          initializer=_worker_init,
                                          initargs=(args.abs_file, args.part, str(edge_geometry_ckpt),
-                                                   config.verbose)) as pool:
+                                                   config.verbose, config.oversized_dump_dir)) as pool:
                     futures = {face.id: pool.submit(_worker_mesh_face, face.id, target_error, args.mmg2d_path, diag_bbox)
                                for face in sorted(todo, key=face_size, reverse=True)}  # largest first
                     for face in todo:  # record in face order, as in the serial loop
                         finish_patch(futures[face.id].result())
+
+        if args.patch is not None:  # alignment and fusion need every face
+            print(f"Local step of face {args.patch} done; checkpoint in {local_ckpt_folder}")
+            result_log.finish()
+            return
 
         # ------------------------------------------------------------------
         # Global alignment and fusion
@@ -330,14 +349,9 @@ def main():
         print_if_verbose(f"Fused mesh bounding box diagonal: {bbox_diag}")
 
         result_log.finish()
-        # if local_ckpt_folder.exists():
-        #     shutil.rmtree(local_ckpt_folder)
-        #     print_if_verbose(f"Removed local checkpoint folder: {local_ckpt_folder}")
 
-    except MemoryError as e:
-        result_log.mark_failed(stage, e)
-        raise
-    except Exception as e:
+    # CollapsedInteriorIsoLineError is a BaseException so that no retry swallows it; record it too
+    except (Exception, CollapsedInteriorIsoLineError) as e:
         result_log.mark_failed(stage, e)
         raise
 

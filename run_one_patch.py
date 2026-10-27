@@ -4,7 +4,7 @@ from operations.preprocess import find_degenerate_corners
 from utils.data_structures import AggregatedPatchTracingData, ConnectivityMaintainance, PatchTracingData, PatchRegularSpaceData
 from utils.mesh_utils import adjacency_list, compute_VF, create_edge, edge_length_mapping
 from utils.regular_space import regular_space_dumb, construct_patch_regular_space_from_tracing_data
-from utils.print import plot_mesh_with_trace, print_with_time, print_if_verbose
+from utils.print import print_if_verbose
 from operations.snapping import solve_one_patch_linear_system
 from operations.consolidate import consolidate_one_patch
 from operations.insert_trace_one_loop import trace_two_vertices
@@ -68,8 +68,7 @@ def check_apexes_on_traced_features(patch_tracing_data):
         if apex_vid not in traced:
             raise ValueError(f"Singular apex vid {apex_vid} (corner {corner_id}) is not on any traced feature edge")
 
-def solve_patch_linear_system(patch_id,
-                              V,
+def solve_patch_linear_system(V,
                               F,
                               patch_data,
                               patch_tracing_data,
@@ -94,8 +93,7 @@ def trace_and_collapse_between_two_vertices(V,
                                               vids,
                                               corners_to_process,
                                               regular_space_data,
-                                              patch_tracing_data,
-                                              summary=None):
+                                              patch_tracing_data):
     """
     Trace and collapse paths between corner vids to merge them.
 
@@ -122,7 +120,6 @@ def trace_and_collapse_between_two_vertices(V,
                                                     tracing_prohibited_vids_set=regular_space_data.prohibited_vids_set,
                                                     adj_list=connectivity.adj_list,
                                                     edge_lengths=connectivity.edge_set_to_length_mapping)
-    #   print_if_verbose(f" Traced path from apex vid {apex_vid} to vid {v_end} with distance {distance} and path vids {path_vids} ")
 
         # Freeze the path edges
         path_edges = set()
@@ -194,8 +191,7 @@ def trace_and_collapse_between_two_vertices(V,
 
 def edit_loops_with_shared_corners(V, F,
                                      regular_space_data,
-                                     patch_tracing_data,
-                                     all_corners_for_part):
+                                     patch_tracing_data):
     connectivity = construct_connectivity_data(V, F)
 
     # Build corners_to_process: dict of corner_id -> vids for corners that need stitching.
@@ -255,8 +251,7 @@ def edit_loops_with_shared_corners(V, F,
                 vids,
                 corners_to_process,
                 regular_space_data,
-                patch_tracing_data,
-                summary=None)
+                patch_tracing_data)
 
             if separated_corners is None:
                 # Success - remove from pending
@@ -283,23 +278,6 @@ def local_step_one_patch(patch_id,
                          attempt = ATTEMPT_MAX,
                          ignore_trace_geometry=False
                          ):
-    # # test 0 double area 
-    # da = igl.doublearea(np.array(patch_data.V), np.array(patch_data.F))
-    # zero_area_faces = np.where(da < 1e-16)[0]
-    # if len(zero_area_faces) > 0:
-    #     print(f"!!!!!Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces before processing.")
-    #     summary["value_error_found"]["zero_area"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces before processing.")
-    # ia = igl.internal_angles(np.array(patch_data.V), np.array(patch_data.F))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before processing")
-    #     summary["value_error_found"]["zero_min_angle"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before processing")
-
-
     print_if_verbose(f"///// Start processing patch {patch_id} /////")
     # Label any oversized-patch dumps (runaway regular-space refinement) with this id.
     config.current_patch_id = patch_id
@@ -321,27 +299,11 @@ def local_step_one_patch(patch_id,
 
     # Check mesh manifoldness after preprocessing
     if not igl.is_edge_manifold(np.array(connectivity.F)):
-        plot_mesh_with_trace(patch_data.V, connectivity.F)
-        print(f"Error: The mesh is not edge manifold after preprocessing the patch {patch_id}.")
+        print_if_verbose(f"Error: The mesh is not edge manifold after preprocessing the patch {patch_id}.")
         summary["value_error_found"]["non_manifold_error"] = True
         raise ValueError(f"Error: The mesh is not edge manifold after preprocessing the patch {patch_id}.")
         # mark as preprocessing failure
     print_if_verbose(f"///// Preprocessed patch {patch_id} Success /////")
-
-    # da = igl.doublearea(np.array(patch_data.V), np.array(connectivity.F))
-    # zero_area_faces = np.where(da < 1e-16)[0]
-    # if len(zero_area_faces) > 0:
-    #     print(f"!!!!!Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after preprocessing.")
-    #     summary["value_error_found"]["zero_area"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after preprocessing.")
-    # ia = igl.internal_angles(np.array(patch_data.V), np.array(connectivity.F))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
-    #     summary["value_error_found"]["zero_min_angle"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
 
     # --- 2. Trace loops ---
     print_if_verbose(f"--- Tracing loops for patch {patch_id} ---")
@@ -357,91 +319,26 @@ def local_step_one_patch(patch_id,
         is_last_attempt=(attempt == ATTEMPT_MAX - 1)
     )
 
-    # da = igl.doublearea(np.array(V), np.array(F))
-    # zero_area_faces = np.where(da < 1e-16)[0]
-    # if len(zero_area_faces) > 0:
-    #     print(f"!!!!!Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after tracing.")
-    #     summary["value_error_found"]["zero_area"] = True
-    #     # plot_mesh_with_trace(V, F, component_fids=zero_area_faces, edge_set=regular_space_data.traced_edge_set)
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         pass
-    #         # raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after tracing.")
-    # ia = igl.internal_angles(np.array(V), np.array(F))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
-    #     summary["value_error_found"]["zero_min_angle"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         pass
-            # raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
-
     # --- 2.5 post trace to enforce topology ----
     print_if_verbose(f"--- Post-trace processing for patch {patch_id} ---")
     # When tracing, loops with shared corners need to be pinched together.
     V, F = edit_loops_with_shared_corners(V, F,
                                           regular_space_data,
-                                          patch_tracing_data,
-                                          all_corners_for_part)
-    # da = igl.doublearea(np.array(V), np.array(F))
-    # zero_area_faces = np.where(da < 1e-16)[0]
-    # if len(zero_area_faces) > 0:
-    #     print(f"!!!!!Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after forming non-manifold mesh.")
-    #     # plot_mesh_with_trace(V, F, edge_set=regular_space_data.traced_edge_set)
-    #     summary["value_error_found"]["zero_area"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         pass
-    #         # raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after forming non-manifold mesh.")
-    # ia = igl.internal_angles(np.array(V), np.array(F))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
-    #     summary["value_error_found"]["zero_min_angle"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         pass
-    #         # raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
+                                          patch_tracing_data)
 
     # //// do one last simplicial embedding to ensure no triangel have all vertices as traced
     regular_space_data = PatchRegularSpaceData()
     construct_patch_regular_space_from_tracing_data(regular_space_data,
                                                   patch_tracing_data)
-    # da = igl.doublearea(np.array(V), np.array(connectivity.F))
-    # zero_area_faces = np.where(da < 1e-16)[0]
-    # if len(zero_area_faces) > 0:
-    #     print(f"!!!!!Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after construct regular space data.")
-    #     # plot_mesh_with_trace(V, connectivity.F, component_fids=zero_area_faces)
-    #     summary["value_error_found"]["zero_area"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         pass
-            # raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after construct regular space data.")
-    print_if_verbose(f"----One last simplicial embedding /////")
+    print_if_verbose("----One last simplicial embedding /////")
     connectivity = construct_connectivity_data(V, F)
     regular_space_dumb(V,
                         connectivity,
                         regular_space_data)
-    # plot_mesh_with_trace(V, F, edge_set=regular_space_data.traced_edge_set)
-    # da = igl.doublearea(np.array(V), np.array(connectivity.F))
-    # zero_area_faces = np.where(da < 1e-16)[0]
-    # if len(zero_area_faces) > 0:
-    #     print(f"!!!!!Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after simplicial embedding post tracing.")
-    #     # plot_mesh_with_trace(V, connectivity.F, component_fids=zero_area_faces)
-    #     summary["value_error_found"]["zero_area"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         pass
-    #         # raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after simplicial embedding post tracing.")
-    # ia = igl.internal_angles(np.array(V), np.array(connectivity.F))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
-    #     summary["value_error_found"]["zero_min_angle"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         pass
-            # raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
     print_if_verbose(f"///// Traced patch {patch_id} Success /////")
-    # plot_mesh_with_trace(V, F, edge_set=regular_space_data.traced_edge_set)
     # --- 3. Solve linear system ---
     print_if_verbose(f"--- Solving linear system for patch {patch_id} ---")
-    linear_solved_V, consolidated_conn = solve_patch_linear_system(patch_id,
-                                                                V,
+    linear_solved_V, consolidated_conn = solve_patch_linear_system(V,
                                                                 connectivity.F, 
                                                                 patch_data=patch_data,
                                                                 patch_tracing_data=patch_tracing_data,
@@ -449,22 +346,6 @@ def local_step_one_patch(patch_id,
                                                                 ignore_errors=ignore_errors
                                                                )
     print_if_verbose(f"///// Solved linear system for patch {patch_id} Success /////")
-    # plot_mesh_with_trace(linear_solved_V, consolidated_conn.F)
-    # plot_mesh_with_trace(linear_solved_V, consolidated_conn.F)
-    # da = igl.doublearea(np.array(linear_solved_V), np.array(consolidated_conn.F))
-    # zero_area_faces = np.where(da < 1e-16)[0]
-    # if len(zero_area_faces) > 0:
-    #     print(f"!!!!!Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after solving linear system.")
-    #     summary["value_error_found"]["zero_area"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after solving linear system.")
-    # ia = igl.internal_angles(np.array(linear_solved_V), np.array(consolidated_conn.F))
-    # zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
-    # if len(zero_min_angle_faces) > 0:
-    #     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
-    #     summary["value_error_found"]["zero_min_angle"] = True
-    #     if attempt < ATTEMPT_MAX - 1:
-    #         raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
 
     # --- 4. Aggregate tracing data ---
     aggregated_tracing_data = aggregate_patch_tracing_data(patch_tracing_data)
