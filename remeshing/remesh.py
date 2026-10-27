@@ -1,35 +1,36 @@
 """Remeshing stage: converts the forward stage's fused.pkl and runs the wildmeshing-toolkit remeshing app.
 
-usage: python remeshing/remesh.py <output_folder> [--len_rel 0.05] [--app PATH]
+usage: python remeshing/remesh.py <output_folder> [--len_rel 1e-3] [--app PATH]
 
 <output_folder> is the folder main.py wrote fused.pkl into. Writes mesh.msh, features.json and remesh.json
 there (convert_pkl_to_wmtk.py), then remeshed.vtu and remeshed_edges.vtu (remeshing_app).
 --len_rel is the target edge length relative to the bounding box diagonal; use the --error_rel of the
-forward run. The bundled app is macOS arm64; on other platforms build remeshing_app and pass --app.
+forward run. remeshing_app is built with the CMakeLists.txt at the repository root (see README); by
+default it is looked up in build/bin.
 """
 import argparse
 import os
-import platform
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BUNDLED_APP = os.path.join(HERE, "..", "bin", "macos-arm64", "remeshing_app")
+BUILT_APP = os.path.join(HERE, "..", "build", "bin", "remeshing_app.exe" if os.name == "nt" else "remeshing_app")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Remesh the forward stage output with wildmeshing-toolkit.")
     parser.add_argument("output_folder", type=str, help="Folder containing fused.pkl from main.py")
-    parser.add_argument("--len_rel", type=float, default=0.05,
-                        help="Target edge length relative to the bounding box diagonal (default: 0.05)")
-    parser.add_argument("--app", type=str, default=None, help="Path to remeshing_app (default: the bundled binary)")
+    parser.add_argument("--len_rel", type=float, default=1e-3,
+                        help="Target edge length relative to the bounding box diagonal (default: 1e-3, "
+                             "the default --error_rel of main.py)")
+    parser.add_argument("--app", type=str, default=None,
+                        help="Path to remeshing_app (default: build/bin/remeshing_app, built with CMake)")
     args = parser.parse_args()
 
-    app = args.app
-    if app is None:
-        if platform.system() != "Darwin" or platform.machine() != "arm64":
-            sys.exit("The bundled remeshing_app is macOS arm64 only; build it (see README) and pass --app.")
-        app = BUNDLED_APP
+    app = args.app if args.app is not None else os.path.normpath(BUILT_APP)
+    if not os.path.exists(app):
+        sys.exit(f"remeshing_app not found at {app}; build it with "
+                 "`cmake -S . -B build && cmake --build build --config Release` (see README) or pass --app.")
     out = os.path.abspath(args.output_folder)
     if not os.path.exists(os.path.join(out, "fused.pkl")):
         sys.exit(f"No fused.pkl in {out}; run main.py first.")

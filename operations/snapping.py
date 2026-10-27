@@ -1,7 +1,7 @@
 import numpy as np
 import math
 from utils.data_structures import LoopGeometryData, PatchTracingData
-from utils.print import plot_mesh_with_trace, print_if_verbose, print_with_time
+from utils.print import print_if_verbose
 from scipy.sparse import diags, coo_matrix
 from scipy.sparse.linalg import splu
 
@@ -31,7 +31,7 @@ def upsample_feature_edge_polyline_V_wrt_arclen(feature_edge_to_polyline_V,
             segment_lengths.append(length)
         
         if polyline_segment_length <= 0:
-            print(f"    !!!! Warning: polyline segment {idx} length is zero,")
+            print_if_verbose(f"    !!!! Warning: polyline segment {idx} length is zero,")
 
         traced_polyline_segment_length.append(polyline_segment_length)
         edge_lengths_per_segment_feature_edge.append(segment_lengths)
@@ -54,7 +54,7 @@ def upsample_feature_edge_polyline_V_wrt_arclen(feature_edge_to_polyline_V,
             # get the ratio of the edge length to the segment length
             cummulative_edge_length += edge_length
             if not traced_polyline_segment_length[i] > 0:
-                t = (j + 1) / len(feature_edge_per_segment_vertex_cnt)
+                t = (j + 1) / len(edge_lengths_per_segment_feature_edge[i])
             else:
                 t = cummulative_edge_length / traced_polyline_segment_length[i]
             # get the position on the edge
@@ -67,13 +67,11 @@ def upsample_feature_edge_polyline_V_wrt_arclen(feature_edge_to_polyline_V,
 def get_boundary_index_and_positions(feature_edge_vids, feature_edge_to_polyline_V):
     # Construct the boundary condition for the mesh
     # Input:
-    # V: vertices of the mesh
-    # F: faces of the mesh
     # feature_edge_vids: the vertex ids of the feature edges
     # feature_edge_to_polyline_V: the vertices of the feature edges
     # Output:
     # bi: the boundary indices
-    # bc: the boundary condition vertices that's the distance from the feature_edge on trimesh to polyline_V
+    # bp: the target positions of the boundary vertices bi (points of polyline_V)
     bc_d = {}
     bi = []
     bp = []
@@ -104,7 +102,15 @@ def get_patch_boundary_condition(V,
                                         patch_tracing_data.remaining_loops_tracing_data[loop_id], 
                                         patch_bi, 
                                         patch_bp)
-    return patch_bi, patch_bp
+    # A corner is listed by every traced feature ending at it: keep one constraint per vertex,
+    # otherwise the harmonic solve counts the corner's displacement once per copy.
+    patch_bp = np.asarray(patch_bp, dtype=np.float64).reshape(-1, 3)
+    bi, first, inverse = np.unique(np.asarray(patch_bi, dtype=np.int64), return_index=True, return_inverse=True)
+    mismatch = np.any(patch_bp != patch_bp[first][inverse], axis=1)
+    if np.any(mismatch):
+        vid = patch_bi[int(np.argmax(mismatch))]
+        raise ValueError(f"Boundary vertex {vid} has different target positions on different traced feature edges")
+    return bi, patch_bp[first]
 
 def get_loop_boundary_condition(V,
                                 loop_geometry_data,
@@ -158,7 +164,6 @@ def harmonic(V, F, b, bc):
         F (m, 3): face indices
         b (k,): boundary indices
         bc (k, 3): boundary values
-        k (int): harmonic order (1 = standard)
 
     Returns:
         W (n, 3): solution
@@ -166,7 +171,7 @@ def harmonic(V, F, b, bc):
     n = V.shape[0]
     L = compute_uniform_laplacian(F, n)
 
-    # Build Q = (-L)^k if k > 1
+    # Q = -L (first-order harmonic)
     Q = -L.copy()
 
     # Solve min xᵀ Q x s.t. x[b] = bc
@@ -190,19 +195,8 @@ def harmonic(V, F, b, bc):
 
     return W
 
-def snapping_for_patch(V, F, bi, bp, summary=None, ignore_errors=False):
+def snapping_for_patch(V, F, bi, bp, summary, ignore_errors=False):
     # Input validation
-    # V_np = np.array(V)
-    # F_np = np.array(F)
-    # if len(bi) != len(bp):
-    #     raise ValueError("Boundary indices and positions must have same length")
-    # if not isinstance(V, np.ndarray) or not isinstance(F, np.ndarray):
-    #     raise ValueError("V and F must be numpy arrays")
-    # if V.dtype != np.float64:
-    #     V = V.astype(np.float64)
-    # if F.dtype != np.int32:
-    #     F = F.astype(np.int32)
-    
     # Ensure bi is within valid range
     if len(bi) > 0 and (np.min(bi) < 0 or np.max(bi) >= len(V)):
         raise ValueError("Boundary indices out of range")
@@ -227,10 +221,9 @@ def snapping_for_patch(V, F, bi, bp, summary=None, ignore_errors=False):
         F_copy = np.ascontiguousarray(F)
         bi_copy = np.ascontiguousarray(bi, dtype=np.int32)
         bc_copy = np.ascontiguousarray(bc, dtype=np.float64)
-        # (no gc.collect() here: a full collection walks every live object,
-        # 92% of the snap stage on 00004838)
+        # (no gc.collect() here: a full collection walks every live object and
+        # dominated the snap stage on large models)
         D = harmonic(V_copy, F_copy, bi_copy, bc_copy)
-        # D = harmonic_with_cotan_laplacian(np.array(V), np.array(F), bi_copy, bc_copy)
         newV = V_copy + D
         V = [pos for pos in newV]
         # Update boundary vertices
@@ -240,16 +233,15 @@ def snapping_for_patch(V, F, bi, bp, summary=None, ignore_errors=False):
         return V
         
     except Exception as e:
-        print(f"Error in harmonic field computation: {str(e)}")
-        print(f"Shapes - V: {np.shape(V)}, F: {np.shape(F)}, bi: {np.shape(bi)}, bc: {np.shape(bc)}")
-        print(f"Memory usage at error:")
+        print_if_verbose(f"Error in harmonic field computation: {str(e)}")
+        print_if_verbose(f"Shapes - V: {np.shape(V)}, F: {np.shape(F)}, bi: {np.shape(bi)}, bc: {np.shape(bc)}")
         raise RuntimeError(f"Failed to compute harmonic field: {str(e)}")
 
 def solve_one_patch_linear_system(V,
                                   F,
                                   patch_tracing_data,
                                   patch_loop_geometry_data,
-                                  summary=None,
+                                  summary,
                                   ignore_errors=False):
     bi, bp = get_patch_boundary_condition(V,
                                           patch_loop_geometry_data,

@@ -1,3 +1,29 @@
+"""
+Per-mesh hausdorff distance from a CAD-sampled point cloud to the remeshed
+triangle mesh. Independent from get_metrics.py so it can be run on every model
+without being tied to mesh-quality sample sizes.
+
+You hand it the directory layout directly:
+    -i <results>     each <results>/<mesh_id>/remeshed.vtu
+    --cad-root <cad> each <cad>/<mesh_id>.hdf5 (as in data/simple), or
+                     <cad>/<mesh_id>/assembly.hdf5 (or <mesh_id>_*.hdf5)
+
+Only the first CAD part (part_id = 0) is meshed in this pipeline, so the point
+cloud is always sampled from part 0.
+
+Writes a CSV: mesh_id, hausdorff. Use plot_metrics.py for plotting.
+hausdorff = max distance from CAD point-cloud samples (random in each face's
+parameter domain, inside its trimming loops) to (V, F) of remeshed.vtu,
+normalized by the CAD bbox diagonal. Distance is computed with
+igl.point_mesh_squared_distance.
+
+Example (batch):
+    python get_distance.py -i out --cad-root data/simple -o distance.csv -j 8
+
+Single-folder mode (auto-detected when -i contains remeshed.vtu directly).
+-i points at the per-mesh folder, --cad-root at the model file (or its folder):
+    python get_distance.py -i out/Box --cad-root data/simple/Box.hdf5 --plot
+"""
 import argparse
 import os
 import sys
@@ -10,35 +36,7 @@ import meshio
 import numpy as np
 import pandas as pd
 
-from abs import read_parts, sample_parts
-
-"""
-Per-mesh hausdorff distance from a CAD-sampled point cloud to the remeshed
-triangle mesh. Independent from get_metrics.py so it can be run on every model
-without being tied to mesh-quality sample sizes.
-
-You hand it the directory layout directly (same convention as MeshMetrics's
-get_metrics):
-    -i <results>     each <results>/<mesh_id>/remeshed.vtu
-    --cad-root <cad> each <cad>/<mesh_id>/assembly.hdf5 (or <mesh_id>_*.hdf5)
-
-Only the first CAD part (part_id = 0) is meshed in this pipeline, so the point
-cloud is always sampled from part 0.
-
-Writes a CSV: mesh_id, hausdorff. Use plot_metrics.py for plotting.
-hausdorff = max distance from CAD point-cloud samples (drawn via sample_parts)
-to (V, F) of remeshed.vtu, normalized by the CAD bbox diagonal. Distance is computed with
-igl.point_mesh_squared_distance.
-
-Example (batch):
-    python get_distance.py -i /path/to/results --cad-root /path/to/cad \\
-        -o distance.csv -j 8
-
-Single-folder mode (auto-detected when -i contains remeshed.vtu directly).
--i and --cad-root point at the per-mesh folders themselves:
-    python get_distance.py -i /path/to/<mesh_id> \\
-        --cad-root /path/to/cad/<mesh_id> --plot
-"""
+from abs import read_parts, sampler
 
 
 def load_triangles(mesh_path):
@@ -49,6 +47,11 @@ def load_triangles(mesh_path):
 
 
 def _resolve_assembly(cad_root, mesh_id):
+    if os.path.isfile(cad_root):
+        return cad_root
+    flat = os.path.join(cad_root, f"{mesh_id}.hdf5")
+    if os.path.exists(flat):
+        return flat
     direct = os.path.join(cad_root, mesh_id, "assembly.hdf5")
     if os.path.exists(direct):
         return direct
@@ -58,20 +61,26 @@ def _resolve_assembly(cad_root, mesh_id):
     return matches[0] if matches else None
 
 
-def _get_normal(face, uv_points):
-    return face.normal(uv_points)
+def _sample_cad_points(assembly_path, num_samples, seed, points_ratio=5):
+    """Sample a point cloud from the faces of the first CAD part (part_id=0).
 
-
-def _sample_cad_points(assembly_path, num_samples):
-    """Sample a point cloud from the first CAD part (part_id=0)."""
+    Each face gets points_ratio * num_samples * (its share of the area) points,
+    uniformly random in its parameter domain, and keeps those inside its
+    trimming loops. This is what abs-hdf5 1.0's sample_parts does with
+    use_poisson=False, force_num_points=False, apply_transform=False; the
+    pinned abs-hdf5 0.2.2 has no such options.
+    """
     parts = read_parts(assembly_path)
-    P, _, _, _ = sample_parts(
-        parts, num_samples, _get_normal,
-        use_poisson=False, force_num_points=False, apply_transform=False,
-    )
-    points = np.asarray(P[0], dtype=np.float64)
+    faces = parts[0].Solid.faces
+    total_area = sum(face.get_area() for face in faces)
+    np.random.seed(seed)  # sampler draws from np.random
+    points = [np.zeros((0, 3))]
+    for face in faces:
+        n = int(np.ceil(face.get_area() / total_area * points_ratio * num_samples))
+        uv, pt = sampler.random_sample(face, n, min_pts=2)
+        points.append(pt[face.filter_outside_points(uv)])
     bbox = np.asarray(parts[0]._geometry_data.bbox)
-    return points, bbox
+    return np.concatenate(points).astype(np.float64), bbox
 
 
 def _read_done_ids(out_path):
@@ -91,7 +100,7 @@ def _append_row(out_path, mesh_id, value):
         f.write(f"{mesh_id},{value}\n")
 
 
-def hausdorff_one(results_path, mesh_id, cad_root, num_samples,
+def hausdorff_one(results_path, mesh_id, cad_root, num_samples, seed=0,
                   plot=False, plot_save_dir=None):
     folder = os.path.join(results_path, mesh_id)
     V, F = load_triangles(os.path.join(folder, "remeshed.vtu"))
@@ -100,9 +109,9 @@ def hausdorff_one(results_path, mesh_id, cad_root, num_samples,
 
     assembly = _resolve_assembly(cad_root, mesh_id)
     if assembly is None:
-        return float("nan")
+        raise FileNotFoundError(f"no CAD model for {mesh_id} in {cad_root}")
 
-    P, bbox = _sample_cad_points(assembly, num_samples)
+    P, bbox = _sample_cad_points(assembly, num_samples, seed)
     if P.shape[0] == 0:
         return float("nan")
 
@@ -156,9 +165,11 @@ if __name__ == "__main__":
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("-i", type=str, default=".", help="Results directory.")
-    parser.add_argument("--cad-root", type=str, required=True, help="CAD root with <mesh_id>/assembly.hdf5.")
+    parser.add_argument("--cad-root", type=str, required=True,
+                        help="CAD root with <mesh_id>.hdf5 or <mesh_id>/assembly.hdf5 (single-folder mode: the model file).")
     parser.add_argument("-o", type=str, default="distance.csv", help="Output CSV.")
-    parser.add_argument("--num-samples", type=int, default=8000, help="CAD point-cloud samples (matches h_distance default).")
+    parser.add_argument("--num-samples", type=int, default=8000, help="CAD point-cloud samples.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed of the CAD point-cloud sampling.")
     parser.add_argument("-j", type=int, default=1, help="Parallel jobs.")
     parser.add_argument("--max-attempts", type=int, default=2,
                         help="Per-mesh retries when a worker pool dies. Mesh_ids that exceed this are skipped.")
@@ -183,11 +194,13 @@ if __name__ == "__main__":
         i_abs = os.path.abspath(args.i.rstrip("/"))
         cad_abs = os.path.abspath(args.cad_root.rstrip("/"))
         mesh_id = os.path.basename(i_abs)
-        if os.path.basename(cad_abs) != mesh_id:
-            print(f"Warning: -i basename '{mesh_id}' != --cad-root basename "
-                  f"'{os.path.basename(cad_abs)}'. Using -i basename as mesh_id.")
+        if not os.path.isfile(cad_abs):  # a file is used as the model as is
+            if os.path.basename(cad_abs) != mesh_id:
+                print(f"Warning: -i basename '{mesh_id}' != --cad-root basename "
+                      f"'{os.path.basename(cad_abs)}'. Using -i basename as mesh_id.")
+            cad_abs = os.path.dirname(cad_abs)
         args.i = os.path.dirname(i_abs)
-        args.cad_root = os.path.dirname(cad_abs)
+        args.cad_root = cad_abs
         mesh_ids = [mesh_id]
         print(f"Single-folder mode: mesh_id={mesh_id}")
     else:
@@ -221,7 +234,7 @@ if __name__ == "__main__":
                     futs = {
                         ex.submit(
                             hausdorff_one, args.i, mid, args.cad_root, args.num_samples,
-                            False, args.plot_save_dir,
+                            args.seed, False, args.plot_save_dir,
                         ): mid
                         for mid in remaining
                     }
@@ -268,7 +281,7 @@ if __name__ == "__main__":
                 try:
                     val = hausdorff_one(
                         args.i, mid, args.cad_root, args.num_samples,
-                        plot=args.plot,
+                        seed=args.seed, plot=args.plot,
                         plot_save_dir=args.plot_save_dir,
                     )
                 except Exception as exc:

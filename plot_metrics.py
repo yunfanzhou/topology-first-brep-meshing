@@ -1,9 +1,3 @@
-import argparse
-import os
-
-import numpy as np
-import pandas as pd
-
 """
 Plot histograms from a CSV produced by get_metrics.py / get_distance.py
 (or any CSV with a mesh_id column and one or more numeric columns).
@@ -24,6 +18,11 @@ Examples:
     python plot_metrics.py -i metrics.csv -o plots --threshold-low num_faces=100
     python plot_metrics.py -i metrics.csv -o plots          # no thresholds, plain hists
 """
+import argparse
+import os
+
+import numpy as np
+import pandas as pd
 
 
 def _set3_color(index):
@@ -240,6 +239,7 @@ def write_below_threshold_list(df, id_col, col, threshold, out_path):
     print(f"  wrote {out_path} ({len(sub)} models with {col} <= {threshold})")
 
 
+# Columns of the authors' batch timing CSVs (not produced by any script in this release).
 STAGE_DEFS = [
     ("Stage 1+2", "patch_tracing_sum_s", 0),
     ("Stage 3+4", "align_fuse_s",        2),
@@ -339,13 +339,14 @@ if __name__ == "__main__":
     parser.add_argument("--color-seed", type=int, default=0,
                         help="Offset into the Plotly Set3 palette; consecutive metrics cycle through Set3 starting from this index.")
     parser.add_argument("--percent-axes", nargs="*", default=["hausdorff"],
-                        help="Column names to render with both axes in %. Values are multiplied by 100 on x; "
+                        help="Column names to render with both axes in %%. Values are multiplied by 100 on x; "
                              "y becomes percent of total. Default: hausdorff. Pass empty to disable.")
     parser.add_argument("--stage-bar", action="store_true",
                         help="Also emit stage_runtime_mean.<fmt> and stage_runtime_median.<fmt>: "
                              "horizontal stacked bars per input CSV using "
                              "patch_tracing_sum_s (Stage 1+2), align_fuse_s (Stage 3+4), remesh_s (Stage 5). "
-                             "Rows with n_runs_unfinished > 0 are excluded from the aggregates.")
+                             "Rows with n_runs_unfinished > 0 are excluded from the aggregates. These columns come "
+                             "from the authors' batch timing CSVs; no script in this release writes them.")
     parser.add_argument("--stage-bar-only", action="store_true",
                         help="Implies --stage-bar and skips the per-column histograms.")
     parser.add_argument("--dataset-labels", nargs="*", default=None,

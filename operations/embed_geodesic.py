@@ -16,7 +16,7 @@ if not hasattr(geodesic.PyGeodesicAlgorithmExact,
         "'pip install -r requirements.txt' (pygeodesic from "
         "https://github.com/yunfanzhou/pygeodesic, commit 7ce3fd8).")
 import igl
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 SAME_VERTEX_TOL = 1e-8
 STRIP_WIDTH_RATIO = 0.01
 PARALLEL_COS_THRESH = 0.98
@@ -66,7 +66,7 @@ def fix_nonmanifold_after_stitch(V_list, F_uv, F_stitched, surface):
                     uv_edges_to_split.add(create_edge(uf[i], uf[j]))
 
     for (va, vb) in uv_edges_to_split:
-        print(f"Splitting UV edge {(va, vb)} to fix non-manifold stitched edge")
+        print_if_verbose(f"Splitting UV edge {(va, vb)} to fix non-manifold stitched edge")
         mid = [0.5 * (V_list[va][k] + V_list[vb][k]) for k in range(len(V_list[va]))]
         mid_vid = len(V_list)
         V_list.append(mid)
@@ -99,13 +99,12 @@ def fix_nonmanifold_after_stitch(V_list, F_uv, F_stitched, surface):
     return surface.sample(np.array(V_list))
 
 
-def convert_3d_geodesic_segments_to_2d(geodesic_return_data, V_uv, F, V_3d=None, F_3d=None):
+def convert_3d_geodesic_segments_to_2d(geodesic_return_data, V_uv, F):
     """Convert pygeodesic face/barycentric data to UV segments via barycentric interpolation."""
     _, path_points, face_ids, face_offsets, bary_start, bary_end = geodesic_return_data
     # face_offsets has length == len(path_points); segment i goes path[i]->path[i+1]
     # faces crossed by segment i: face_ids[face_offsets[i]:face_offsets[i+1]]
     uv_segments = []
-    seg_3d = []
     for i in range(len(face_offsets) - 1):
         for j in range(face_offsets[i], face_offsets[i + 1]):
             face_uv = V_uv[F[face_ids[j]]]  # (3, 2)
@@ -156,22 +155,18 @@ def _project_point_to_mesh(pt, V_3d, F):
 
 
 def geodesic_uv_segments_one_feature_edge(singularities,
-                                          trim_domain,
                                            polyline,
                                            V_3d: list,
                                            V_uv: list,
                                            F_3d: list,
                                            F_uv: list,
-                                           sub_domains = None,
-                                           padding_ratio = STRIP_WIDTH_RATIO):
+                                           sub_domains = None):
     """Trace geodesics for each consecutive pair of polyline points.
 
-    V_3d, V_uv, F are the base mesh lists and are NOT modified.
-    For each segment we work on a fresh copy.
+    V_3d, V_uv, F_3d, F_uv are the base mesh lists and are NOT modified.
 
-    If `sub_domains` is provided, singularity side-targets are derived from the
-    sub-domain bounds (correctly handles both boundary padding and interior
-    strip gaps). Otherwise falls back to `padding_ratio` (boundary-only).
+    Singularity side-targets are derived from the `sub_domains` bounds
+    (handles both boundary padding and interior strip gaps).
     """
     sides = set()
     if sub_domains is not None:
@@ -186,20 +181,6 @@ def geodesic_uv_segments_one_feature_edge(singularities,
                     sides.add((axis, lb))
                 elif raw_target >= ub - SAME_VERTEX_TOL:
                     sides.add((axis, ub))
-    elif padding_ratio is not None:
-        for sing in singularities.values():
-            axis = 0 if sing['uiso'] else 1
-            pt = np.asarray(sing['point2d'], dtype=float)
-            raw_target = float(pt[axis])
-            lb = float(trim_domain[axis, 0])
-            ub = float(trim_domain[axis, 1])
-            span = ub - lb
-            pad = padding_ratio * span
-            if abs(raw_target - lb) < abs(raw_target - ub):
-                side_target = lb + pad
-            else:
-                side_target = ub - pad
-            sides.add((axis, side_target))
     side_edges = []
     for axis, side_target in sides:
         bnd_edges = _get_boundary_edges(F_uv)
@@ -242,11 +223,11 @@ def geodesic_uv_segments_one_feature_edge(singularities,
         cached_src = (vid_tgt, fid_tgt, closest_tgt, tgt_bary)
 
         if is_near_singularity(side_edges, src_bary, fid_src, F_uv) or is_near_singularity(side_edges, tgt_bary, fid_tgt, F_uv):
-            print(f"segment {k}: endpoint near singularity strip, skipping")
+            print_if_verbose(f"segment {k}: endpoint near singularity strip, skipping")
             continue
 
         if np.linalg.norm(closest_src - closest_tgt) < SAME_VERTEX_TOL:
-            print(f"segment {k}: src==tgt, skipping")
+            print_if_verbose(f"segment {k}: src==tgt, skipping")
             continue
 
         geo_data = geoalg.geodesicDistanceWithFacesAndBarycentricFromSurfacePoints(
@@ -256,13 +237,13 @@ def geodesic_uv_segments_one_feature_edge(singularities,
             vid_tgt=vid_tgt,
         )
         all_uv_segments.extend(
-            convert_3d_geodesic_segments_to_2d(geo_data, V_uv_np, F_uv_np, V_3d_np, F_3d_np)
+            convert_3d_geodesic_segments_to_2d(geo_data, V_uv_np, F_uv_np)
         )
     return all_uv_segments  # list of (2, 2) UV segments
 
 
 
-def resample_uv_segments(uv_segments, V_pre, F_pre, surface, target_edge_length):
+def resample_uv_segments(uv_segments, surface, target_edge_length):
     """Resample UV segments so 3D edge lengths match the pre-CDT mesh.
 
     Connected segments are chained into polylines.  Each chain is resampled
@@ -444,6 +425,8 @@ def embed_loops_one_patch(V_uv: list,
                         singularity_sides: dict = None,
                         interior_singularity_idx=None,
                         use_feature_conflict_refine: bool = True):
+    if max_iterations < 1:  # the remesh loop below must run at least once
+        raise ValueError(f"embed_loops_one_patch needs max_iterations >= 1, got {max_iterations}")
 
     embedded_ids = set()
     uv_segments = []
@@ -467,19 +450,16 @@ def embed_loops_one_patch(V_uv: list,
             if P.shape[0] < 2:
                 continue
             local_uv_segments = geodesic_uv_segments_one_feature_edge(face.singularities,
-                                                                     face.surface.trim_domain,
                                                                      P,
                                                                      V_3d,
                                                                      V_uv,
                                                                      F_3d,
                                                                      F_uv,
-                                                                     sub_domains = sub_domains,
-                                                                     padding_ratio = padding_ratio)
+                                                                     sub_domains = sub_domains)
             # Snap to sub-domain bboxes before resampling so chain lengths are accurate.
             is_seam = edge_id in seam_ids
-            cleaned_uv_segments, bnd_req_uvs = snap_segments_to_bbox(
+            cleaned_uv_segments = snap_segments_to_bbox(
                 local_uv_segments, sub_domains,
-                V_uv, F_uv,
                 surface=face.surface,
                 seam_sides=periodic_sides if is_seam else None,
                 seam_tol_3d=SEAM_TOL_EPS_FACTOR * target_error if is_seam else None,
@@ -490,7 +470,7 @@ def embed_loops_one_patch(V_uv: list,
     # Deduplicate overlapping segments from geodesic tracing before resampling.
     uv_segments = deduplicate_uv_segments(uv_segments)
     # Resample UV segments so their 3D edge lengths match the pre-CDT mesh.
-    uv_segments = resample_uv_segments(uv_segments, V_uv, F_uv, face.surface, before_embedding_edge_length)
+    uv_segments = resample_uv_segments(uv_segments, face.surface, before_embedding_edge_length)
     # Conflict-driven size field: refine a throwaway copy of the pre-embed
     # mesh until distinct feature-curve pieces stop sharing triangles, then
     # keep only its per-vertex size as a lookup field. Applied inside the
@@ -511,11 +491,12 @@ def embed_loops_one_patch(V_uv: list,
             V_bg_3d = face.surface.sample(np.asarray(V_bg, dtype=float))
             h_bg = per_vertex_edge_length_3d(V_bg_3d, np.asarray(F_bg, dtype=int))
             size_field = (cKDTree(V_bg_3d), h_bg)
+        except TimeoutError:
+            raise  # alarm_timeout fired: let it reach its caller
         except Exception as e:
             print_if_verbose(f"[conflict-refine] size field disabled for this patch: {e}")
     V_cdt, F_cdt, constrained_edges, bbox_edges_by_side = embed_geodesic_segments_in_uv(
         uv_segments, sub_domains,
-        extra_points=V_uv,
         u_periodic=u_periodic,
         v_periodic=v_periodic,
         singularity_sides=singularity_sides,
@@ -554,6 +535,8 @@ def embed_loops_one_patch(V_uv: list,
                 f"[conflict-refine] CDT refine: {nv0}v/{nf0}f -> "
                 f"{len(V_cdt)}v/{len(F_cdt)}f, "
                 f"{len(constrained_edges)} required edges")
+        except TimeoutError:
+            raise  # alarm_timeout fired: let it reach its caller
         except Exception as e:
             print_if_verbose(f"[conflict-refine] CDT refine pass skipped: {e}")
 
@@ -564,11 +547,13 @@ def embed_loops_one_patch(V_uv: list,
     feat_edges = feat_edges if feat_edges else None
 
     V_cur, F_cur = V_cdt, F_cdt
+    if mmg_factor is None:
+        mmg_factor = compute_mmg_factor(face.surface, V_cur)
     resampled = False
     for it in range(max_iterations):
         print_if_verbose(f"After emebedding MMG iteration {it}, factor={mmg_factor:.3e}")
         EE, FF_m, GG = compute_first_fundamental_form(face.surface, V_cur)
-        base_factor = mmg_factor if mmg_factor is not None else compute_mmg_factor(face.surface, V_cur)
+        base_factor = mmg_factor
         if size_field is not None:
             # Cap the local target size by the conflict-refined field:
             # factor = 1/h^2, so max() takes the finer of the two. The
@@ -618,8 +603,7 @@ def embed_loops_one_patch(V_uv: list,
 
 def snap_segments_to_bbox(uv_segments,
                           sub_domains,
-                          V, F,
-                          avg_edge_length=None, surface=None,
+                          surface=None,
                           seam_sides=None, seam_tol_3d=None):
     """Drop segments that are very close to a sub-domain boundary or fall in a gap.
 
@@ -641,7 +625,6 @@ def snap_segments_to_bbox(uv_segments,
     Returns
     -------
     filtered_segments : list of (2, 2) arrays
-    bnd_req_uvs : set  (always empty, kept for API compatibility)
     """
     u_l_g = min(sd[0] for sd in sub_domains)
     u_u_g = max(sd[1] for sd in sub_domains)
@@ -700,7 +683,7 @@ def snap_segments_to_bbox(uv_segments,
             continue
 
         filtered.append(seg)
-    return filtered, set()
+    return filtered
 
 
 def merge_duplicate_cdt_vertices(V, F, edges, markers, tol):
@@ -796,7 +779,7 @@ def pslg_invalid_incidence(V, segments):
     Triangle allows segments to intersect only at shared endpoints.
     Independently traced feature edges can violate this — a vertex of one
     trace landing on another trace's chord, or two chords properly crossing
-    (22832 patch 348: both traces rode the same background-mesh edge). On
+    (e.g. both traces riding the same background-mesh edge). On
     such input Triangle's segment-insertion walk (finddirection /
     scoutsegment) either errors or cycles forever, depending on which branch
     the exact-zero predicates select. The caller uses this tripwire to fail
@@ -857,7 +840,6 @@ def pslg_invalid_incidence(V, segments):
 def embed_geodesic_segments_in_uv(
     uv_segments,
     sub_domains,
-    extra_points=None,
     u_periodic=False,
     v_periodic=False,
     singularity_sides=None,
@@ -1048,12 +1030,9 @@ def embed_geodesic_segments_in_uv(
             print(f"[triangle] stderr:\n{triangle_stderr}", file=sys.stderr)
 
     if 'triangles' not in result:
-        np.save('/tmp/tri_debug_verts.npy', verts_arr)
-        np.save('/tmp/tri_debug_segs.npy', np.array(segs, dtype=np.int32))
         raise Exception(
             f"Triangle returned no triangulation (keys={list(result.keys())}). "
-            f"Triangle stderr: {triangle_stderr!r}. "
-            "Input saved to /tmp/tri_debug_verts.npy and /tmp/tri_debug_segs.npy for inspection."
+            f"Triangle stderr: {triangle_stderr!r}."
         )
 
     V = result['vertices']

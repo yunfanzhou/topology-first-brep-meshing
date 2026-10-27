@@ -1,0 +1,11 @@
+// <hash_map> is gone from the MSVC standard library as of Visual Studio 2026, but geogram's bundled
+// PoissonRecon (which fast-envelope builds on Windows) still includes it and uses stdext::hash_map as a
+// plain hash map. cmake/wmtk_project_include.cmake adds this directory only when the real header is missing.
+#pragma once
+#include <unordered_map>
+
+namespace stdext {
+template <class Key, class T, class Hash = std::hash<Key>, class KeyEqual = std::equal_to<Key>,
+          class Allocator = std::allocator<std::pair<const Key, T>>>
+using hash_map = std::unordered_map<Key, T, Hash, KeyEqual, Allocator>;
+}
