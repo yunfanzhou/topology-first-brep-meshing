@@ -1,16 +1,23 @@
 # Tested with Python 3.11 and these versions.
+# abs-hdf5: the pipeline uses the 0.2 API (1.0 renamed part.Solid); packages for Python 3.9-3.11 only
 abs-hdf5==0.2.2
 geomdl==5.3.1
 h5py==3.13.0
 libigl==2.5.1
 matplotlib==3.9.2
 meshio==5.3.5
+# Mmg 5.8.0's mmg2d_O3 executable, which the forward stage calls
+mmgpy==0.17.1
 numpy==2.4.4
 pillow==11.0.0
 pygeodesic @ git+https://github.com/yunfanzhou/pygeodesic.git@7ce3fd80c65460aff1f940dd7a3cb963e31fbd9c
 pyvista==0.45.0
 scipy==1.15.0
 triangle==20250106
+# wildmeshing-toolkit's isotropic remeshing (remeshing stage), built from source: its main with pull
+# requests #1137 (feature_fields on the memory route), #1139 (the fold check at sharp curves) and #1151
+# (one Eigen heap alignment on x86-64), which no release has yet
+wildmeshing @ git+https://github.com/wildmeshing/wildmeshing-toolkit.git@efdd61367f32f792511e24f0dde2cac4183218b9
 # evaluation scripts (get_distance.py, get_metrics.py, plot_metrics.py) and tests
 pandas==2.3.3
 plotly==6.6.0

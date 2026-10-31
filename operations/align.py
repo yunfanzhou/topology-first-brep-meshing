@@ -1,11 +1,9 @@
 from operations.internal_operations import split_edge_in_mesh_overloaded
 from utils.mesh_utils import create_edge
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 import igl
 import utils.config as config
 import numpy as np
-TOPO_TOL = 1e-7
-GEOM_TOL = 1e-10
 BOUNDARY_TOL = 1e-3
 SAME_VERTEX_TOL = 1e-8
 def cumulative_lengths(connectivity, segment_vids):
@@ -146,7 +144,6 @@ def align_one_segment_of_patches(Vs,
         segments: list of list of vids corresponding to same edge segment embedded on different patches.
     '''
     ALIGN_SNAP_TOL_REL = 1e-2  # tolerance in normalized [0,1] parameter space for snapping cross-segment vertices
-    ALIGN_SNAP_TOL = 1e2222
     # get cumulated lengths for all segments
     norm_param_list = []
     for i in range(len(segments)):
@@ -154,7 +151,6 @@ def align_one_segment_of_patches(Vs,
         total_length = cum_length[-1]
         norm_param = [x / total_length for k, x in enumerate(cum_length) if k != 0 and k != len(cum_length) - 1]
         norm_param_list.append(norm_param)
-        ALIGN_SNAP_TOL =  min(total_length * ALIGN_SNAP_TOL_REL, ALIGN_SNAP_TOL)
 
     # flat sorted list of (norm_param, segment_index, vid_index_in_norm_param_list)
     flat = [(norm_param_list[i][j], i, j)
@@ -170,7 +166,7 @@ def align_one_segment_of_patches(Vs,
         current_segs = {flat[0][1]}
         for k in range(1, len(flat)):
             p, seg_i, vid_j = flat[k]
-            if p - current_group[0][0] <= ALIGN_SNAP_TOL and seg_i not in current_segs:
+            if p - current_group[0][0] <= ALIGN_SNAP_TOL_REL and seg_i not in current_segs:
                 current_group.append(flat[k])
                 current_segs.add(seg_i)
             else:
@@ -276,7 +272,7 @@ def align_adjacent_patches(patch_to_V,
         connectivities = []
         Vs = []
         for patch_id in adjacent_patch_ids:
-            print("aligning patch ", patch_id, " for feature edge ", feature_edge_id)
+            print_if_verbose(f"aligning patch {patch_id} for feature edge {feature_edge_id}")
             connectivities.append(patch_to_connectivity[patch_id])
             Vs.append(patch_to_V[patch_id])
 
@@ -288,10 +284,8 @@ def align_adjacent_patches(patch_to_V,
                 zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
                 if len(zero_min_angle_faces) > 0:
                     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
-                    # raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces before alignment")
                 if len(zero_area_faces) > 0:
                     print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_area_faces)} zero-area faces before alignment")
-                    # raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces before alignment")
 
 
             aggregated_tracing_data = patch_to_aggregated_tracing_data[patch_id]
@@ -350,12 +344,10 @@ def align_adjacent_patches(patch_to_V,
         zero_area_faces = np.where(da < 1e-16 )[0]
         if len(zero_area_faces) > 0:
             print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after alignment")
-            # raise ValueError(f"Error: Patch {patch_id} has {len(zero_area_faces)} zero-area faces after alignment")
         ia = igl.internal_angles(np.array(patch_to_V[patch_id]), np.array(patch_to_connectivity[patch_id].F))
         zero_min_angle_faces = np.where(ia.min(axis=1) < 1e-16)[0]
         if len(zero_min_angle_faces) > 0:
             print_if_verbose(f" Warning: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces after alignment")
-            # raise ValueError(f"Error: Patch {patch_id} has {len(zero_min_angle_faces)} zero-min-angle faces after alignment")
 
 
 def _get_boundary_edges(F):
@@ -583,11 +575,10 @@ def _align_chain_pair(V, connectivity, chain0, chain1, periodic_index, non_perio
         V, connectivity, chain1, periodic_index, non_periodic, params0_to_inject)
 
     if len(chain0) != len(chain1):
-        print(f"Warning: seam chain lengths differ after alignment: "
-              f"{len(chain0)} vs {len(chain1)}")
-        print("chain 0", np.array(V)[chain0])
-        print("chain 1", np.array(V)[chain1])
-        plot_mesh_with_trace(V, connectivity.F, vector_of_vids=chain0 + chain1)
+        print_if_verbose(f"Warning: seam chain lengths differ after alignment: "
+                         f"{len(chain0)} vs {len(chain1)}")
+        print_if_verbose(f"chain 0 {np.array(V)[chain0]}")
+        print_if_verbose(f"chain 1 {np.array(V)[chain1]}")
         raise Exception(f"Error: seam chain lengths differ after alignment: "
                         f"{len(chain0)} vs {len(chain1)}")
 
@@ -622,7 +613,7 @@ def align_seam_edges_from_tags(V, connectivity, u_lb_edges, u_ub_edges, v_lb_edg
         non_periodic = 1 - periodic_index
 
         sides = {0: list(lb_edges), 1: list(ub_edges)}
-        print(f"  Tag-based seam edges: {len(sides[0])} at lb, {len(sides[1])} at ub (periodic_index={periodic_index})")
+        print_if_verbose(f"  Tag-based seam edges: {len(sides[0])} at lb, {len(sides[1])} at ub (periodic_index={periodic_index})")
         if not sides[0] or not sides[1]:
             continue
 
@@ -630,8 +621,8 @@ def align_seam_edges_from_tags(V, connectivity, u_lb_edges, u_ub_edges, v_lb_edg
         chains1 = _build_ordered_chains(V, sides[1], non_periodic)
 
         if len(chains0) != len(chains1):
-            print(f"  Warning: different number of chains on periodic sides: "
-                  f"{len(chains0)} vs {len(chains1)} (periodic_index={periodic_index})")
+            print_if_verbose(f"  Warning: different number of chains on periodic sides: "
+                             f"{len(chains0)} vs {len(chains1)} (periodic_index={periodic_index})")
             # Fallback: use single-chain behavior
             chains0 = [_build_ordered_chain(V, sides[0], non_periodic)]
             chains1 = [_build_ordered_chain(V, sides[1], non_periodic)]
@@ -711,8 +702,8 @@ def embed_and_align_seam_edges(V, connectivity, face, u_lb, u_ub, v_lb, v_ub,
         chains1 = _build_ordered_chains(V, sides[1], non_periodic)
 
         if len(chains0) != len(chains1):
-            print(f"  Warning: different number of chains on periodic sides: "
-                  f"{len(chains0)} vs {len(chains1)} (periodic_index={periodic_index})")
+            print_if_verbose(f"  Warning: different number of chains on periodic sides: "
+                             f"{len(chains0)} vs {len(chains1)} (periodic_index={periodic_index})")
             # Fallback: use single-chain behavior
             chains0 = [_build_ordered_chain(V, sides[0], non_periodic)]
             chains1 = [_build_ordered_chain(V, sides[1], non_periodic)]

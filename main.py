@@ -1,8 +1,10 @@
+import importlib.util
 import os
-import platform
+import shutil
 from os.path import exists
 from run_one_patch import local_step_one_patch
 from initial_meshing import (
+    CollapsedInteriorIsoLineError,
     create_feature_edge_geometry_data,
     run_initial_meshing_for_face,
     build_singularity_data_from_face,
@@ -26,6 +28,28 @@ ATTEMPT_MAX = 3
 PARALLEL_MIN_FACES = 16
 
 
+def default_mmg2d_path():
+    """mmg2d_O3 of the mmgpy package (requirements.txt) if installed, else mmg2d_O3 on PATH.
+
+    The mmg2d_O3 command mmgpy installs is a Python launcher, which would start an interpreter for
+    every mmg call, so the executable inside the package is called directly.
+    """
+    spec = importlib.util.find_spec("mmgpy")
+    if spec is not None and spec.submodule_search_locations:
+        exe = os.path.join(spec.submodule_search_locations[0], "bin",
+                           "mmg2d_O3.exe" if os.name == "nt" else "mmg2d_O3")
+        if exists(exe):
+            return exe
+    return "mmg2d_O3"
+
+
+def default_workers():
+    """CPUs this process may run on (its CPU affinity) where the OS reports it, else the CPU count."""
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
+
 def form_per_patch_summary():
     return {
         "success": False,
@@ -47,7 +71,12 @@ def mesh_one_face(face, edge_geometry_data, all_corners, target_error, mmg2d_pat
     """Initial meshing + local step of one face with up to ATTEMPT_MAX attempts.
 
     Returns a dict: ok, patch_id, duration, attempts, and V/connectivity/tracing/summary on
-    success or error on failure. target_error is the model's; retries halve it for this face only.
+    success or error on failure. target_error is the model's; only the first attempt remeshes
+    with it. A retry (attempt k > 0) runs no mmg: it refines the UV mesh saved by the first
+    attempt (or the initial grid if there is none) with k levels of igl.upsample, then runs the
+    local step again on it. An attempt that raises an Exception is retried, and the face fails
+    after the last one. MemoryError is re-raised, and CollapsedInteriorIsoLineError (a
+    BaseException) passes through: both end the run.
     """
     patch_id = face.id
     config.current_patch_id = patch_id  # labels oversized-patch dumps
@@ -55,7 +84,6 @@ def mesh_one_face(face, edge_geometry_data, all_corners, target_error, mmg2d_pat
     patch_summary = form_per_patch_summary()
     prev_V_uv = prev_F = prev_sub_domains = None
     for attempt in range(ATTEMPT_MAX):
-        target_error = target_error * (0.5 ** attempt)
         try:
             V_3d, F, u_periodic_edges, v_periodic_edges, sing_info, surface_merged_edges, fallback_V_uv, fallback_F, fallback_sub_domains = run_initial_meshing_for_face(
                 face,
@@ -91,19 +119,22 @@ def mesh_one_face(face, edge_geometry_data, all_corners, target_error, mmg2d_pat
             return dict(ok=True, patch_id=patch_id, V=linear_solved_V, connectivity=connectivity,
                         tracing=aggregated_tracing_data, summary=patch_summary, attempts=attempt + 1,
                         duration=(datetime.now() - patch_start_time).total_seconds())
-        except ValueError as e:
+        except MemoryError:
+            raise  # a retry runs on an upsampled mesh: it would need more memory
+        except Exception as e:
+            error = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
             print_if_verbose(
-                f"!!!!! Local steps failed for patch {patch_id} on attempt {attempt} due to: {e} !!!!!"
+                f"!!!!! Local steps failed for patch {patch_id} on attempt {attempt} due to: {error} !!!!!"
             )
             if attempt == ATTEMPT_MAX - 1:
-                return dict(ok=False, patch_id=patch_id, error=str(e), attempts=attempt + 1,
+                return dict(ok=False, patch_id=patch_id, error=error, attempts=attempt + 1,
                             duration=(datetime.now() - patch_start_time).total_seconds())
 
 
 _WORKER = {}
 
 
-def _worker_init(abs_file, part_index, edge_geometry_path, verbose):
+def _worker_init(abs_file, part_index, edge_geometry_path, verbose, oversized_dump_dir):
     # Only paths cross the pipe: a large payload here makes the parent block on each worker's start-up.
     from abs import read_parts
     part = read_parts(abs_file)[part_index]
@@ -111,6 +142,7 @@ def _worker_init(abs_file, part_index, edge_geometry_path, verbose):
     _WORKER["edge_geometry_data"] = atomic_load(edge_geometry_path)["edge_geometry_data"]
     _WORKER["all_corners"] = build_corner_data_from_abs_part(part)
     config.verbose = verbose
+    config.oversized_dump_dir = oversized_dump_dir
 
 
 def _worker_mesh_face(face_id, target_error, mmg2d_path, diag_bbox):
@@ -128,21 +160,25 @@ def main():
                         help="Directory where results and checkpoints are written")
     parser.add_argument("--error_rel", type=float, default=1e-3,
                         help="Relative target error with respect to the model bounding box diagonal (default: 1e-3)")
-    bundled_mmg2d = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin", "macos-arm64", "mmg2d_O3")
-    use_bundled = exists(bundled_mmg2d) and platform.system() == "Darwin" and platform.machine() == "arm64"
-    parser.add_argument("--mmg2d_path", type=str, default=bundled_mmg2d if use_bundled else "mmg2d_O3",
-                        help="Path to mmg2d executable (default: the bundled macOS arm64 binary, else mmg2d_O3 on PATH)")
-    
+    parser.add_argument("--mmg2d_path", type=str, default=None,
+                        help="Path to the mmg2d executable (default: the one of the mmgpy package, else mmg2d_O3 on PATH)")
     parser.add_argument("--part", type=int, default=0,
                         help="Part index within the ABS file (default: 0)")
     parser.add_argument("--patch", type=int, default=None,
-                        help="If specified, only process the face with this id")
+                        help="If specified, only run the local step of the face with this id (no alignment or fusion)")
     parser.add_argument("--verbose", type=int, default=0)
-    parser.add_argument("--resume", type=bool, default=False)
-    parser.add_argument("--workers", type=int, default=os.cpu_count() or 1,
-                        help="Processes for the per-face local step (default: CPU count; 1 = serial). "
-                             "The output does not depend on it.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Reuse the checkpoints of a previous run in output_folder")
+    parser.add_argument("--workers", type=int, default=default_workers(),
+                        help="Processes for the per-face local step (default: the number of CPUs this "
+                             "process may run on, i.e. its CPU affinity, or the CPU count where the OS does "
+                             "not report it; 1 = serial). The output does not depend on it.")
     args = parser.parse_args()
+    if args.mmg2d_path is None:
+        args.mmg2d_path = default_mmg2d_path()
+    if shutil.which(args.mmg2d_path) is None:
+        parser.error(f"mmg2d executable not found: {args.mmg2d_path} (pip install -r requirements.txt, "
+                     "or pass --mmg2d_path)")
 
     os.makedirs(args.output_folder, exist_ok=True)
     ckpt_folder = Path(args.output_folder) / "checkpoints"
@@ -151,6 +187,7 @@ def main():
 
     if args.verbose:
         config.verbose = args.verbose
+    config.oversized_dump_dir = os.path.join(args.output_folder, "oversized_patch_dumps")
 
     if exists(result_json) and not args.resume:
         os.remove(result_json)
@@ -192,7 +229,7 @@ def main():
         # Feature edge → adjacent face ids (needed by global alignment)
         feature_edge_to_patches = build_feature_edge_to_patches_from_abs_part(part)
 
-        result_log.set_total_patches(len(part.Solid.faces))
+        result_log.set_total_patches(1 if args.patch is not None else len(part.Solid.faces))
 
         # ------------------------------------------------------------------
         # Local step: initial meshing + tracing + linear solve
@@ -208,9 +245,6 @@ def main():
         global_align_ckpt = ckpt_folder / "global_alignment.pkl"
         fuse_dir = Path(args.output_folder) / "fused.pkl"
 
-        patch_error_sum = 0.0
-        patch_boundary_vertex_count = 0
-        patch_max_error = 0.0
         if len(part.Solid.faces) == 0:
             raise Exception(" EMPTY_MODEL")
         if (global_align_ckpt.exists() or fuse_dir.exists()) and args.resume:
@@ -231,10 +265,16 @@ def main():
                     patch_to_tracing_data[patch_id] = data["tracing"]
                     continue
                 todo.append(face)
+            if args.patch is not None and not todo and args.patch not in patch_to_V:
+                raise ValueError(f"No face with id {args.patch} in part {args.part}")
+
+            def save_checkpoint(r):
+                atomic_save({"V": r["V"],
+                             "connectivity": r["connectivity"],
+                             "tracing": r["tracing"]}, local_ckpt_folder / f"patch_{r['patch_id']}.pkl")
 
             def finish_patch(r):
-                """Record one face's result (in face order); raise on failure."""
-                nonlocal patch_error_sum, patch_boundary_vertex_count, patch_max_error
+                """Record one face's result; raise on failure."""
                 patch_id = r["patch_id"]
                 if not r["ok"]:
                     result_log.patch_failed(
@@ -243,41 +283,55 @@ def main():
                         detail=r["error"],
                         attempts=r["attempts"])
                     raise ValueError(f"Failed to process patch {patch_id} after {ATTEMPT_MAX} attempts: {r['error']}")
-                summary = r["summary"]
-                if summary["max_error"] is not None and summary["max_error"] > patch_max_error:
-                    patch_max_error = summary["max_error"]
-                if summary["avg_error"] is not None:
-                    patch_error_sum += summary["avg_error"] * summary["number_of_boundary_vertices"]
-                patch_boundary_vertex_count += summary["number_of_boundary_vertices"]
                 result_log.patch_done(patch_id, r["duration"], attempts=r["attempts"])
                 patch_to_tracing_data[patch_id] = r["tracing"]
                 patch_to_V[patch_id] = r["V"]
                 patch_to_connectivity[patch_id] = r["connectivity"]
-                atomic_save({"V": r["V"],
-                             "connectivity": r["connectivity"],
-                             "tracing": r["tracing"]}, local_ckpt_folder / f"patch_{patch_id}.pkl")
                 print_if_verbose(f"///// Finished local steps for patch {patch_id} /////")
 
             if args.workers <= 1 or len(todo) < PARALLEL_MIN_FACES:
                 for face in todo:
-                    finish_patch(mesh_one_face(face, edge_geometry_data, all_corners, target_error,
-                                               args.mmg2d_path, diag_bbox))
+                    r = mesh_one_face(face, edge_geometry_data, all_corners, target_error,
+                                      args.mmg2d_path, diag_bbox)
+                    if r["ok"]:
+                        save_checkpoint(r)
+                    finish_patch(r)
             else:
                 import multiprocessing as mp
-                from concurrent.futures import ProcessPoolExecutor
+                from concurrent.futures import ProcessPoolExecutor, as_completed
 
                 def face_size(face):  # polyline points on the face's edges: predicts its meshing time
                     return sum(len(edge_geometry_data.get(he.edge.id, ())) for loop in face.loops for he in loop.halfedges)
 
+                done, failed = {}, None  # results of the finished faces by id; the first failed face
                 with ProcessPoolExecutor(max_workers=min(args.workers, len(todo)),
                                          mp_context=mp.get_context("spawn"),
                                          initializer=_worker_init,
                                          initargs=(args.abs_file, args.part, str(edge_geometry_ckpt),
-                                                   config.verbose)) as pool:
-                    futures = {face.id: pool.submit(_worker_mesh_face, face.id, target_error, args.mmg2d_path, diag_bbox)
-                               for face in sorted(todo, key=face_size, reverse=True)}  # largest first
-                    for face in todo:  # record in face order, as in the serial loop
-                        finish_patch(futures[face.id].result())
+                                                   config.verbose, config.oversized_dump_dir)) as pool:
+                    futures = [pool.submit(_worker_mesh_face, face.id, target_error, args.mmg2d_path, diag_bbox)
+                               for face in sorted(todo, key=face_size, reverse=True)]  # largest first
+                    try:
+                        for future in as_completed(futures):
+                            r = future.result()
+                            if not r["ok"]:
+                                failed = r
+                                break
+                            save_checkpoint(r)  # right away, so that --resume keeps it if the run is killed
+                            done[r["patch_id"]] = r
+                    finally:
+                        if len(done) < len(todo):  # a face failed: drop the queued faces
+                            pool.shutdown(wait=False, cancel_futures=True)
+                        for face in todo:  # record in face order, as in the serial loop
+                            if face.id in done:
+                                finish_patch(done[face.id])
+                    if failed is not None:
+                        finish_patch(failed)  # records the failure and raises
+
+        if args.patch is not None:  # alignment and fusion need every face
+            print(f"Local step of face {args.patch} done; checkpoint in {local_ckpt_folder}")
+            result_log.finish()
+            return
 
         # ------------------------------------------------------------------
         # Global alignment and fusion
@@ -330,14 +384,9 @@ def main():
         print_if_verbose(f"Fused mesh bounding box diagonal: {bbox_diag}")
 
         result_log.finish()
-        # if local_ckpt_folder.exists():
-        #     shutil.rmtree(local_ckpt_folder)
-        #     print_if_verbose(f"Removed local checkpoint folder: {local_ckpt_folder}")
 
-    except MemoryError as e:
-        result_log.mark_failed(stage, e)
-        raise
-    except Exception as e:
+    # CollapsedInteriorIsoLineError is a BaseException so that no retry swallows it; record it too
+    except (Exception, CollapsedInteriorIsoLineError) as e:
         result_log.mark_failed(stage, e)
         raise
 
