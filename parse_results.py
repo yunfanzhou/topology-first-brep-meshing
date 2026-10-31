@@ -27,6 +27,8 @@ def load_result(folder):
     except (json.JSONDecodeError, IOError):
         return None
 def check_topo(folder):
+    """topo_ok of <folder>/eval.json, which the authors' batch evaluation writes (no script in this release
+    does); None when the file is missing."""
     path = os.path.join(folder, "eval.json")
     if not os.path.exists(path):
         return None
@@ -45,12 +47,15 @@ def total_duration(data):
 def print_summary(results, list_path=None, zero_path = None):
     """Print a human-readable summary table."""
     success = []
+    not_remeshed = []
     failed = []
     running = []
     for name, data in sorted(results.items()):
         status = data.get("status", "unknown")
         if status == "success":
             success.append(name)
+        elif status == "not_remeshed":
+            not_remeshed.append(name)
         elif status == "failed":
             failed.append(name)
         else:
@@ -59,6 +64,8 @@ def print_summary(results, list_path=None, zero_path = None):
     total = len(results)
     print(f"Total models: {total}")
     print(f"  Success: {len(success)}")
+    if not_remeshed:
+        print(f"  Forward stage only (not remeshed): {len(not_remeshed)}")
     print(f"  Failed:  {len(failed)}")
     print(f"  Running: {len(running)}")
     print()
@@ -129,7 +136,7 @@ def write_timing_csv(results, csv_path):
     """Write per-model timing CSV for successful runs."""
     rows = []
     for name, data in sorted(results.items()):
-        if data.get("status") != "success":
+        if data.get("status") not in ("success", "not_remeshed"):  # timings are of the forward stage
             continue
 
         patches = data.get("patches", {})
@@ -160,7 +167,7 @@ def write_timing_csv(results, csv_path):
     if os.path.exists(csv_path):
         print(f"Warning: {csv_path} already exists and will be overwritten.")
     else:
-        os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+        os.makedirs(os.path.dirname(csv_path) or ".", exist_ok=True)
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
@@ -189,9 +196,9 @@ def main():
         data = load_result(folder)
         if data is not None:
             if data.get("status") == "success" and not os.path.exists(
-                os.path.join(folder, "remesh.done")
+                os.path.join(folder, "remeshed.vtu")
             ):
-                data["status"] = "running"
+                data["status"] = "not_remeshed"
             results[entry] = data
             ok = check_topo(folder)
             if ok is None:

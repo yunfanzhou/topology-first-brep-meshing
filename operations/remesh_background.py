@@ -8,26 +8,48 @@ metric length corresponds to a 3D edge length of L.
 Iterative error refinement
 --------------------------
 After each MMG pass the per-triangle approximation error is computed.  Where
-max(tri_errors) > target_error the factor is multiplied by
-max(tri_errors) / target_error (exploiting the h² error scaling) and MMG is
+the average triangle error exceeds target_error the factor is multiplied by
+avg_error / target_error (exploiting the h² error scaling) and MMG is
 run again on the new mesh.  This repeats until the error is within budget or
 max_iterations is reached.
 """
 
 import numpy as np
+import multiprocessing
 import subprocess
 import tempfile
 import os
 from typing import Dict, List, Optional, Tuple
 from utils.mesh_utils import compute_VF, create_edge
 from operations.align import _get_boundary_edges
-from utils.print import plot_mesh_with_trace, print_if_verbose, dump_oversized_patch_state
+from utils.print import print_if_verbose, dump_oversized_patch_state
+import utils.config as config
 GEOM_TOL = 1e-10
-STRIP_WIDTH_RATIO = 0.01
-SAME_VERTEX_TOL = 1e-8
 # ---------------------------------------------------------------------------
 # Medit .mesh file I/O
 # ---------------------------------------------------------------------------
+
+def _mmg_edges(feature_edges, required_edges):
+    """The edges given to mmg, as both routes of mmg_remesh pass them.
+
+    Returns the 1-based edge pairs (the feature edges, by tag, then the
+    required edges), their reference tags (1 for a required edge) and the
+    1-based positions of the required edges in that list.
+    """
+    edges, tags = [], []
+    if feature_edges:
+        for tag, tag_edges in feature_edges.items():
+            for v0, v1 in tag_edges:
+                edges.append((v0, v1))
+                tags.append(tag)
+    req_start = len(edges)
+    if required_edges:
+        for v0, v1 in required_edges:
+            edges.append((v0, v1))
+            tags.append(1)
+    required_ids = list(range(req_start + 1, len(edges) + 1))
+    return edges, tags, required_ids
+
 
 def write_medit_mesh(
     path: str,
@@ -59,27 +81,16 @@ def write_medit_mesh(
         for i in range(nf):
             fh.write(f"{F[i, 0] + 1} {F[i, 1] + 1} {F[i, 2] + 1} 0\n")
 
-        all_edges = []
-        edge_tags = []
-        if feature_edges:
-            for tag, edges in feature_edges.items():
-                for v0, v1 in edges:
-                    all_edges.append((v0, v1))
-                    edge_tags.append(tag)
-        req_start = len(all_edges)
-        if required_edges:
-            for v0, v1 in required_edges:
-                all_edges.append((v0, v1))
-                edge_tags.append(1)
+        all_edges, edge_tags, required_ids = _mmg_edges(feature_edges, required_edges)
 
         if all_edges:
             fh.write(f"\nEdges\n{len(all_edges)}\n")
             for (v0, v1), tag in zip(all_edges, edge_tags):
                 fh.write(f"{v0} {v1} {tag}\n")
 
-        if required_edges:
-            fh.write(f"\nRequiredEdges\n{len(required_edges)}\n")
-            for idx in range(req_start + 1, req_start + len(required_edges) + 1):
+        if required_ids:
+            fh.write(f"\nRequiredEdges\n{len(required_ids)}\n")
+            for idx in required_ids:
                 fh.write(f"{idx}\n")
 
         if required_vertices:
@@ -95,6 +106,40 @@ def write_medit_mesh(
         fh.write("\nEnd\n")
 
 
+def mmg_metric(
+    EE: np.ndarray,
+    FF: np.ndarray,
+    GG: np.ndarray,
+    factor: float = 1.0,
+) -> np.ndarray:
+    """The 2D anisotropic tensor metric given to mmg, (nv, 3): m11, m12, m22.
+
+    These correspond to E, F, G of the first fundamental form scaled by ``factor``.
+
+    A tensor that is non-finite, not positive definite, or anisotropic beyond
+    1e8:1 (det < 1e-8 * s^2, s = (E + G) / 2; e.g. at a pole or apex) is
+    replaced by the isotropic tensor (s, 0, s) of the same scale, or of the
+    median scale of the valid tensors when s itself is unusable. The test is
+    scale-free, so it does not depend on the model's units or on ``factor``.
+    """
+    E = np.array(EE, dtype=float).reshape(-1)
+    Fm = np.array(FF, dtype=float).reshape(-1)
+    G = np.array(GG, dtype=float).reshape(-1)
+    with np.errstate(invalid="ignore", over="ignore"):
+        s = 0.5 * (E + G)
+        det = E * G - Fm * Fm
+        valid = (np.isfinite(E) & np.isfinite(Fm) & np.isfinite(G)
+                 & (E > 0) & (G > 0) & (det > 0) & (det >= 1e-8 * s * s))
+        bad_scale = ~valid & ~(np.isfinite(s) & (s > 0))
+    if bad_scale.any():
+        if not valid.any():
+            raise ValueError("mmg_metric: no valid metric tensor to take "
+                             "a fallback scale from")
+        s[bad_scale] = np.median(s[valid])
+    E[~valid], Fm[~valid], G[~valid] = s[~valid], 0.0, s[~valid]
+    return factor * np.column_stack([E, Fm, G])
+
+
 def write_medit_sol(
     path: str,
     EE: np.ndarray,
@@ -102,92 +147,69 @@ def write_medit_sol(
     GG: np.ndarray,
     factor: float = 1.0,
 ):
-    """Write a 2D anisotropic tensor metric in Medit .sol format.
+    """Write mmg_metric(EE, FF, GG, factor) in Medit .sol format."""
+    write_medit_metric(path, mmg_metric(EE, FF, GG, factor))
 
-    The symmetric 2x2 metric tensor at each vertex has 3 components: m11, m12, m22.
-    These correspond to E, F, G of the first fundamental form scaled by ``factor``.
-    """
-    nv = len(EE)
+
+def write_medit_metric(path: str, M: np.ndarray):
+    """Write (nv, 3) tensors (m11, m12, m22) in Medit .sol format, exactly (%.17g)."""
     with open(path, "w") as fh:
         fh.write("MeshVersionFormatted 2\n\n")
         fh.write("Dimension 2\n\n")
-        fh.write(f"SolAtVertices\n{nv}\n")
+        fh.write(f"SolAtVertices\n{len(M)}\n")
         fh.write("1 3\n")  # 1 solution of type 3 (tensor)
-        for i in range(nv):
-            e, f, g = float(EE[i]), float(FF[i]), float(GG[i])
-            det = e * g - f * f
-            if abs(det) < 1e-8 or abs(det) > 1e14:
-                e, f, g = 1.0, 0.0, 1.0
-            fh.write(f"{factor * e:.17g} {factor * f:.17g} {factor * g:.17g}\n")
+        for e, f, g in M.tolist():
+            fh.write(f"{e:.17g} {f:.17g} {g:.17g}\n")
         fh.write("\nEnd\n\n")
-def write_medit_sol_scalar(path: str, h_values: np.ndarray):
-    """Write a scalar (isotropic) size map in Medit .sol format.
-
-    Each vertex gets a single target edge length in UV space.
-    MMG will create edges approximately this length at each vertex.
-    """
-    nv = len(h_values)
-    with open(path, "w") as fh:
-        fh.write("MeshVersionFormatted 2\n\n")
-        fh.write("Dimension 2\n\n")
-        fh.write(f"SolAtVertices\n{nv}\n")
-        fh.write("1 1\n")  # 1 solution of type 1 (scalar)
-        for i in range(nv):
-            fh.write(f"{h_values[i]:.17g}\n")
-        fh.write("\nEnd\n")
 
 
-def read_medit_mesh(path: str) -> Tuple[np.ndarray, np.ndarray, Dict[int, List[Tuple[int, int]]]]:
-    """Read a 2D triangle mesh from Medit .mesh format.
+def read_medit_meshb(path: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Read the 2D mesh mmg2d writes in binary Medit format (.meshb).
+
+    Unlike its .mesh output, which prints coordinates with 15 significant
+    digits, .meshb holds them as doubles, so the mesh is mmg's own. mmg 5.8
+    writes format version 2: native-endian 32-bit integers, 64-bit reals, and
+    after each keyword the file offset of the next keyword and the count.
 
     Returns
     -------
     V : (nv, 2)
     F : (nf, 3), 0-based
-    tagged_edges : {tag: [(v0, v1), ...]} — 0-based edge pairs grouped by
-        Medit reference id. Empty dict if no Edges block.
+    E : (ne, 2), 0-based edges
+    E_ref : (ne,) their reference tags
     """
-    V = None
-    F = None
-    tagged_edges: Dict[int, List[Tuple[int, int]]] = {}
-    with open(path, "r") as fh:
-        lines = fh.readlines()
-
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if line == "Vertices":
-            i += 1
-            nv = int(lines[i].strip())
-            V = np.zeros((nv, 2))
-            for vi in range(nv):
-                i += 1
-                parts = lines[i].strip().split()
-                V[vi, 0] = float(parts[0])
-                V[vi, 1] = float(parts[1])
-        elif line == "Triangles":
-            i += 1
-            nf = int(lines[i].strip())
-            F = np.zeros((nf, 3), dtype=int)
-            for fi in range(nf):
-                i += 1
-                parts = lines[i].strip().split()
-                F[fi, 0] = int(parts[0]) - 1
-                F[fi, 1] = int(parts[1]) - 1
-                F[fi, 2] = int(parts[2]) - 1
-        elif line == "Edges":
-            i += 1
-            ne = int(lines[i].strip())
-            for ei in range(ne):
-                i += 1
-                parts = lines[i].strip().split()
-                v0, v1, tag = int(parts[0]) - 1, int(parts[1]) - 1, int(parts[2])
-                tagged_edges.setdefault(tag, []).append((v0, v1))
-        i += 1
-
+    with open(path, "rb") as fh:
+        buf = fh.read()
+    head = np.frombuffer(buf, dtype=np.int32, count=2)
+    if head[0] != 1 or head[1] != 2:
+        raise RuntimeError(f"{path}: not a native-endian Medit version 2 file "
+                           f"(code {head[0]}, version {head[1]})")
+    dim, V, F, E = 2, None, None, np.zeros((0, 3), dtype=np.int32)
+    pos = 8
+    while pos + 4 <= len(buf):
+        kwd, next_pos = np.frombuffer(buf, dtype=np.int32, count=2, offset=pos)
+        if kwd == 54:  # End
+            break
+        if kwd == 3:  # Dimension
+            dim = int(np.frombuffer(buf, dtype=np.int32, count=1, offset=pos + 8)[0])
+        elif kwd in (4, 5, 6):  # Vertices, Edges, Triangles
+            n = int(np.frombuffer(buf, dtype=np.int32, count=1, offset=pos + 8)[0])
+            if kwd == 4:
+                rec = np.dtype([("c", np.float64, dim), ("ref", np.int32)])
+                V = np.frombuffer(buf, dtype=rec, count=n, offset=pos + 12)["c"][:, :2].copy()
+            else:
+                cols = 3 if kwd == 5 else 4
+                block = np.frombuffer(buf, dtype=np.int32, count=n * cols, offset=pos + 12)
+                if kwd == 5:
+                    E = block.reshape(n, 3)
+                else:
+                    F = block.reshape(n, 4)[:, :3].astype(int) - 1
+        if next_pos <= pos:
+            raise RuntimeError(f"{path}: bad offset {next_pos} after keyword {kwd} at {pos}")
+        pos = int(next_pos)
     if V is None or F is None:
         raise RuntimeError(f"Failed to parse mesh from {path}")
-    return V, F, tagged_edges
+    return V, F, E[:, :2].astype(int) - 1, E[:, 2].astype(int)
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +274,7 @@ def compute_segment_approximation_errors(
 
 
 # ---------------------------------------------------------------------------
-# Edge meshing: optimal split point via Newton's method
+# Edge meshing: optimal split point via dense sampling
 # ---------------------------------------------------------------------------
 
 def find_max_error_parameter(curve, t0, t1, p0, p1):
@@ -288,15 +310,13 @@ def refine_edge_mesh(
     """Iteratively refine a curve discretisation by splitting segments at the
     point of maximum approximation error.
 
-    Uses quadrature-based error metric and Newton's method to find optimal
+    Uses a quadrature-based error metric and a dense sample sweep to find the
     split locations (see ``find_max_error_parameter``).
 
     Parameters
     ----------
     curve : abs curve object with ``.sample()``, ``.derivative()``, ``.interval``.
-    target_3d_length : desired max 3D segment length (as fraction of curve
-        bounding-box diagonal; scaled internally).
-    target_error : max allowed approximation error (as fraction of bbox diagonal).
+    target_error : max allowed per-segment approximation error [3D length units].
     max_iterations : maximum refinement passes.
     initial_segments : number of uniform segments to start with.
 
@@ -338,49 +358,144 @@ def refine_edge_mesh(
 # MMG remeshing
 # ---------------------------------------------------------------------------
 
-def mmg_remesh(
-    V: np.ndarray,
-    F: np.ndarray,
-    h_values: Optional[np.ndarray] = None,
-    EE: Optional[np.ndarray] = None,
-    FF_m: Optional[np.ndarray] = None,
-    GG: Optional[np.ndarray] = None,
-    metric_factor: float = 1.0,
-    hgrad: float = 1.5,
-    mmg2d_path: str = "mmg2d_O3",
-    feature_edges: Optional[Dict[int, List[Tuple[int, int]]]] = None,
-    required_vertices: Optional[List[int]] = None,
-    required_edges: Optional[List[Tuple[int, int]]] = None,
-    nosizreq: bool = False,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Run MMG2D remeshing via the CLI.
+def _mmg_in_memory(V, F, edges, edge_tags, required_ids, required_vertices, metric,
+                   hgrad, nosizreq):
+    """Run mmg through mmgpy on what _mmg_executable writes to its files.
 
-    Parameters
-    ----------
-    feature_edges : {tag: [(v0, v1), ...]} — 1-based edge pairs grouped by
-        Medit reference tag.
-    required_edges : list of (v0, v1) 1-based vertex index pairs frozen in the
-        output (no split / collapse / swap).
-
-    Returns
-    -------
-    V_out : (nv_out, 2) remeshed vertices.
-    F_out : (nf_out, 3) remeshed triangles (0-based).
+    Returns V (nv, 2), F (nf, 3), E (ne, 2) 0-based and E_ref (ne,) as
+    read_medit_meshb does.
     """
+    import mmgpy
+
+    def new_mesh():
+        mesh = mmgpy.MmgMesh2D()
+        mesh.set_mesh_size(vertices=len(V), triangles=len(F), edges=len(edges))
+        mesh.set_vertices(np.ascontiguousarray(np.asarray(V)[:, :2], dtype=np.float64))
+        return mesh
+
+    mesh = new_mesh()
+    F = np.ascontiguousarray(F, dtype=np.int32)
+    try:
+        mesh.set_triangles(F)
+    except RuntimeError:
+        # MMG2D_Set_triangle refuses a zero-area triangle, which mmg's file
+        # reader takes. It has stored the triangle by then, as the reader
+        # does, but mmgpy's bulk setter gives the mesh up: set them one at a
+        # time on a new mesh and pass over the refusals (the sizes are right,
+        # so a zero area is the only one possible).
+        mesh = new_mesh()
+        for i, (v0, v1, v2) in enumerate(F.tolist()):
+            try:
+                mesh.set_triangle(v0, v1, v2, 0, i)
+            except RuntimeError:
+                pass
+    if edges:
+        mesh.set_edges(np.asarray(edges, dtype=np.int32) - 1,
+                       np.asarray(edge_tags, dtype=np.int32))
+    if required_ids:
+        mesh.set_required_edges(np.asarray(required_ids, dtype=np.int32) - 1)
+    if required_vertices:
+        mesh.set_required_vertices(np.asarray(required_vertices, dtype=np.int32) - 1)
+    mesh.set_field("tensor", metric)
+    options = {"verbose": -1}
+    if hgrad != 0:
+        options["hgrad"] = float(hgrad)
+    if nosizreq:
+        options["nosizreq"] = 1
+    mesh.remesh(**options)
+    E, E_ref = mesh.get_edges_with_refs()
+    return (mesh.get_vertices(), mesh.get_triangles().astype(int),
+            np.asarray(E).astype(int), np.asarray(E_ref).astype(int))
+
+
+# This process's mmg helper, (pid, process, connection), started on first use.
+_mmg_helper = None
+
+
+def _mmg_helper_main(conn):
+    """The helper process: runs _mmg_in_memory on each request until conn closes.
+
+    mmg's console output is dropped, as mmg_remesh drops the executable's
+    unless it fails; a failure comes back as its error message.
+    """
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    while True:
+        try:
+            request = conn.recv()
+        except EOFError:
+            return
+        try:
+            reply = ("ok", _mmg_in_memory(**request))
+        except Exception as e:
+            reply = ("error", f"{type(e).__name__}: {e}")
+        conn.send(reply)
+
+
+def start_mmg_helper():
+    """Start this process's mmg helper process, unless it is running.
+
+    The first in-memory mmg_remesh call starts it otherwise. Starting it
+    earlier lets it boot (about 0.3 s: a new interpreter importing this
+    pipeline and mmgpy) while this process does other work.
+    """
+    global _mmg_helper
+    if (_mmg_helper is None or _mmg_helper[0] != os.getpid()
+            or not _mmg_helper[1].is_alive()):
+        ctx = multiprocessing.get_context("spawn")
+        conn, child_conn = ctx.Pipe()
+        proc = ctx.Process(target=_mmg_helper_main, args=(child_conn,), daemon=True)
+        proc.start()
+        child_conn.close()
+        _mmg_helper = (os.getpid(), proc, conn)
+
+
+def _mmg_in_helper(request):
+    """_mmg_in_memory(**request), run in this process's helper process.
+
+    As with the executable, a run longer than config.mmg_timeout_seconds is
+    killed and a crash in mmg ends only the helper; both raise RuntimeError.
+    The next call starts a new helper.
+    """
+    global _mmg_helper
+    start_mmg_helper()
+    _, proc, conn = _mmg_helper
+    try:
+        conn.send(request)
+        if not conn.poll(config.mmg_timeout_seconds):
+            raise RuntimeError(f"mmg2d timed out after {config.mmg_timeout_seconds} s")
+        status, result = conn.recv()
+    except BaseException as e:
+        # Timed out (here or by alarm_timeout), or the helper died: it is
+        # mid-request either way, so it is not reused.
+        _mmg_helper = None
+        proc.kill()
+        proc.join()
+        conn.close()
+        if isinstance(e, (EOFError, OSError)):
+            raise RuntimeError(
+                f"mmg2d failed: its helper process ended (exit code {proc.exitcode})") from None
+        raise
+    if status != "ok":
+        raise RuntimeError(f"mmg2d failed: {result}")
+    return result
+
+
+def _mmg_executable(mmg2d_path, V, F, feature_edges, required_vertices, required_edges,
+                    metric, hgrad, nosizreq):
+    """Run the mmg2d executable at mmg2d_path on files; returns what _mmg_in_memory does."""
     tmpdir = tempfile.mkdtemp()
     try:
         mesh_in = os.path.join(tmpdir, "input.mesh")
         sol_in = os.path.join(tmpdir, "input.sol")
-        mesh_out = os.path.join(tmpdir, "output.mesh")
+        mesh_out = os.path.join(tmpdir, "output.meshb")
 
         write_medit_mesh(mesh_in, V, F,
                          feature_edges=feature_edges,
                          required_vertices=required_vertices,
                          required_edges=required_edges)
-        if EE is not None:
-            write_medit_sol(sol_in, EE, FF_m, GG, metric_factor)
-        else:
-            write_medit_sol_scalar(sol_in, h_values)
+        write_medit_metric(sol_in, metric)
 
         cmd = [
             mmg2d_path,
@@ -393,17 +508,79 @@ def mmg_remesh(
             cmd += ["-hgrad", str(hgrad)]
         if nosizreq:
             cmd += ["-nosizreq"]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=config.mmg_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"mmg2d timed out after {config.mmg_timeout_seconds} s") from None
         if result.returncode != 0:
             raise RuntimeError(
                 f"mmg2d failed (return code {result.returncode}):\n"
                 f"stdout: {result.stdout}\nstderr: {result.stderr}"
             )
 
-        V_out, F_out, tagged_edges_out = read_medit_mesh(mesh_out)
+        return read_medit_meshb(mesh_out)
     finally:
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def mmg_remesh(
+    V: np.ndarray,
+    F: np.ndarray,
+    EE: Optional[np.ndarray] = None,
+    FF_m: Optional[np.ndarray] = None,
+    GG: Optional[np.ndarray] = None,
+    metric_factor: float = 1.0,
+    hgrad: float = 1.5,
+    mmg2d_path: Optional[str] = None,
+    feature_edges: Optional[Dict[int, List[Tuple[int, int]]]] = None,
+    required_vertices: Optional[List[int]] = None,
+    required_edges: Optional[List[Tuple[int, int]]] = None,
+    nosizreq: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, Dict[int, List[Tuple[int, int]]]]:
+    """Run MMG2D remeshing.
+
+    With mmg2d_path None (the default) mmg runs in memory, through mmgpy, in
+    a helper process; otherwise the mmg2d executable at mmg2d_path runs on
+    files. Both give mmg the same mesh, metric and options and read back its
+    doubles, so they return the same mesh, bit for bit. Either way a run
+    longer than config.mmg_timeout_seconds is killed, and that or any mmg
+    failure raises RuntimeError. The helper process is started by
+    multiprocessing's spawn, so a script calling this needs the usual
+    ``if __name__ == "__main__":`` guard.
+
+    Parameters
+    ----------
+    feature_edges : {tag: [(v0, v1), ...]} — 1-based edge pairs grouped by
+        Medit reference tag.
+    required_edges : list of (v0, v1) 1-based vertex index pairs frozen in the
+        output (no split / collapse / swap).
+
+    Returns
+    -------
+    V_out : (nv_out, 2) remeshed vertices.
+    F_out : (nf_out, 3) remeshed triangles (0-based).
+    tagged_edges : {tag: [(v0, v1), ...]} — 0-based output edges grouped by
+        Medit reference tag.
+    """
+    metric = mmg_metric(EE, FF_m, GG, metric_factor)
+    if mmg2d_path is None:
+        edges, edge_tags, required_ids = _mmg_edges(feature_edges, required_edges)
+        V_out, F_out, E, E_ref = _mmg_in_helper(dict(
+            V=V, F=F, edges=edges, edge_tags=edge_tags, required_ids=required_ids,
+            required_vertices=required_vertices, metric=metric,
+            hgrad=hgrad, nosizreq=nosizreq))
+    else:
+        V_out, F_out, E, E_ref = _mmg_executable(
+            mmg2d_path, V, F, feature_edges, required_vertices, required_edges,
+            metric, hgrad, nosizreq)
+    if len(F_out) == 0:
+        raise ValueError(f"mmg2d returned no triangles ({len(V_out)} vertices)")
+    tagged_edges_out: Dict[int, List[Tuple[int, int]]] = {}
+    for (v0, v1), tag in zip(E.tolist(), E_ref.tolist()):
+        tagged_edges_out.setdefault(tag, []).append((v0, v1))
 
     # Monitoring only: dump oversized state for later investigation, never
     # interfere with the run.
@@ -424,15 +601,13 @@ def stitch_singularity_fans_3d(
 ) -> Tuple[list, list, dict]:
     """Create fan triangles connecting singularity strip boundaries to apex vertices.
 
-    Identifies hole-boundary edges (boundary edges NOT on a non-periodic domain
-    line), assigns each to the nearest singularity by 3D midpoint, then builds
-    fan triangles to the singularity apex.
+    For each singularity, adds an apex vertex at its 3D point and builds fan
+    triangles from that singularity's strip-boundary edges to the apex.
 
     Parameters
     ----------
-    u_periodic, v_periodic : whether the u/v is periodic 
-    padding_ratio : float, optional
-        The ratio of the domain width to use for padding when matching strip boundaries.
+    sing_edges : dict mapping singularity index → list of (a, b) strip-boundary
+        edges (vertex ids into V_3d / F_3d).
 
     Returns
     -------
@@ -451,14 +626,7 @@ def stitch_singularity_fans_3d(
     open_edges = _get_boundary_edges(F_3d)
     fanned = set()
 
-    # 2. Build VF (vertex → faces) for boundary-edge vertices only.
-    edge_vids = set()
-    for edges in sing_edges.values():
-        for a, b in edges:
-            edge_vids.add(a)
-            edge_vids.add(b)
-
-    # 3. Per singularity: insert 3D center vertex, create fan triangles.
+    # Per singularity: insert 3D center vertex, create fan triangles.
     for idx, edges in sing_edges.items():
         if not edges:
             continue
@@ -522,10 +690,10 @@ def compute_first_fundamental_form(
 # error. The discretization (mesh triangles, edge chords) must deviate from the
 # true surface by strictly less than R_min = 1/|kappa|_max — the surface's
 # local reach — or closest-point projection becomes many-to-one and distinct
-# nearby features alias onto the same region (torus band, 23226 patch 66).
+# nearby features alias onto the same region (e.g. on a torus band).
 # 0.5 (half the reach) prevents the aliasing catastrophe but still allows
 # 120-degree arc elements — too lax for stable closest-point/trace
-# localization: on 22832 patch 259 (cylinder r=1.55) it gave 3 elements per
+# localization: on a cylinder face (r=1.55) it gave 3 elements per
 # circumference and element-ridge projection ambiguity broke the embedded
 # feature chains (0.1 gave 18 triangles and zero interior breaks there).
 # 0.2 (sag <= 20% of R, ~5 elements per full circle) is the working
@@ -544,8 +712,8 @@ def max_principal_curvature(surface, uv_points: np.ndarray) -> Optional[np.ndarr
     d1 = surface.derivative(uv, order=1)   # (n, 3, 2)
     # Temporary guard until abs is fixed: returns None when the kernel has no
     # second derivative. scipy raises ValueError for B-splines whose interior
-    # knots repeat up to the degree (a kink: 00009595 face 3, extrusion of a
-    # cubic profile with knot 1 repeated 3 times), and abs's Offset returns None.
+    # knots repeat up to the degree (a kink, e.g. the extrusion of a cubic
+    # profile with an interior knot repeated 3 times), and abs's Offset returns None.
     try:
         d2 = surface.derivative(uv, order=2)   # (n, 3, 2, 2)
     except ValueError as e:
@@ -563,7 +731,7 @@ def max_principal_curvature(surface, uv_points: np.ndarray) -> Optional[np.ndarr
     # Degeneracy tests — a sample only votes on curvature if its tangent pair
     # is well conditioned. Two independent failure modes:
     #  * collapsed tangent magnitude (parametric pole: a whole domain edge
-    #    maps to one 3D point, |s_v| ~ 1e-15 — 23226 faces 403/408). Real
+    #    maps to one 3D point, |s_v| ~ 1e-15). Real
     #    anisotropy is ~20:1 here; 1e-8 relative is far below any real ratio.
     #  * collapsed tangent angle: det(I)/(E*G) = sin^2(angle).
     # Rejected samples report kappa = 0 ("no opinion"); R_min comes from the
@@ -769,11 +937,11 @@ def compute_triangle_approximation_errors(
         i0, i1, i2 = F[fi]
         uv0, uv1, uv2 = V_uv[i0], V_uv[i1], V_uv[i2]
 
-        # Skip degenerate UV triangles (mirrors BarycentricTriangle::is_degenerate)
+        # Degenerate UV triangles raise (test mirrors BarycentricTriangle::is_degenerate)
         e1 = uv1 - uv0
         e2 = uv2 - uv0
         if abs(e1[0] * e2[1] - e1[1] * e2[0]) < 1e-15:
-            print(f"Warning: degenerate UV triangle at index {fi} with vertices {uv0}, {uv1}, {uv2}")
+            print_if_verbose(f"Warning: degenerate UV triangle at index {fi} with vertices {uv0}, {uv1}, {uv2}")
             raise Exception(f"COMPUTE TRIANGLE ERROR: Degenerate UV triangle at index {fi} with vertices {i0}, {i1}, {i2}")
 
         # Quadrature points in actual UV space via barycentric interpolation
@@ -797,16 +965,11 @@ def compute_triangle_approximation_errors(
 # ---------------------------------------------------------------------------
 
 def compute_edge_length_metric(V, F, surface):
-    """Compute the edge length metric for each triangle edge.
-
-    For an edge from vertex i to j, we estimate the 3D length of the curve
-    on the surface between V[i] and V[j] and use that as the target length for
-    that edge in UV space.  This is a more accurate version of the FFF-based
-    metric that accounts for curvature along edges.
+    """3D chord length of each triangle edge (UV vertices lifted by ``surface``).
 
     Returns
     -------
-    edge_lengths : (nf, 3) target UV edge lengths for each triangle edge.
+    edge_lengths : (nf, 3) 3D lengths of the edges i0→i1, i1→i2, i2→i0 of each triangle.
     """
     nf = F.shape[0]
     edge_lengths = np.zeros((nf, 3))
@@ -831,7 +994,7 @@ def remesh_with_error_and_edge_metric(
     F: np.ndarray,
     target_error: Optional[float] = 5e-2,
     hgrad: float = -1,
-    mmg2d_path: str = "mmg2d_O3",
+    mmg2d_path: Optional[str] = None,
     max_iterations: int = 10,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
     """Remesh a UV mesh using an anisotropic tensor metric from the first
@@ -847,44 +1010,49 @@ def remesh_with_error_and_edge_metric(
     surface : surface object with ``.sample()`` and ``.derivative()``.
     V_uv : (nv, 2) UV vertex positions of the initial mesh.
     F : (nf, 3) triangle connectivity (0-based).
-    target_3d_length : desired 3D edge length (as fraction of bbox diagonal).
     target_error : if given, iterate until avg triangle approximation error
         is within this threshold.
     hgrad : MMG gradation parameter.
-    mmg2d_path : path to the mmg2d executable.
+    mmg2d_path : the mmg2d executable to run mmg with, or None (the default)
+        to run it in memory; see mmg_remesh.
     max_iterations : maximum number of MMG passes.
 
     Returns
     -------
     V_out : (nv_out, 2) remeshed UV vertices.
     F_out : (nf_out, 3) remeshed triangles (0-based).
-    factor_out : final tensor scaling factor used by MMG.
+    factor_out : tensor scaling factor of the MMG pass that produced
+        V_out, F_out.
     """
     # Stagnation thresholds (rationale, not tunables):
     #   STAGNATION_RATIO = 0.9 — an iteration that fails to reduce avg_error
     #     by at least 10% counts as no progress.  Wider than the ~1.6% noise
-    #     observed when mmg can't follow the requested factor (e.g. surface
-    #     042 in 22345_bc482c26/assembly.hdf5: avg_error stayed in
-    #     [2.808, 2.855] across 9 iterations while factor scaled by ~15^9).
-    #   STAGNATION_LIMIT = 2 — one stagnant iteration could be a coincidence
+    #     observed when mmg can't follow the requested factor (on one surface
+    #     avg_error stayed in [2.808, 2.855] across 9 iterations while factor
+    #     scaled by ~15^9).
+    #   STAGNATION_LIMIT = 5 — one stagnant iteration could be a coincidence
     #     (mmg producing a slightly different connectivity at the same
-    #     effective h); two in a row signals a structural inability to
+    #     effective h); five in a row signals a structural inability to
     #     refine, so further factor scaling is wasted work.
     STAGNATION_RATIO = 0.9
     STAGNATION_LIMIT = 5
 
     factor = compute_mmg_factor(surface, V_uv)
+    mesh_factor = factor  # factor of the mmg pass that produced V_cur, F_cur
     V_cur, F_cur = V_uv, F
     prev_avg_error: Optional[float] = None
     stagnation_count = 0
 
-    # mmg RuntimeError, degenerate-UV-triangle exceptions from
-    # compute_triangle_approximation_errors, and stagnation are all
-    # surfaced to the caller; run_initial_meshing_for_face's outer
-    # try/except routes them to the insert_feature_edges_uv fallback.
+    # mmg RuntimeError, mmg_remesh's ValueError on an empty result and
+    # degenerate-UV-triangle exceptions from
+    # compute_triangle_approximation_errors propagate to the caller;
+    # run_initial_meshing_for_face's outer try/except routes them to the
+    # insert_feature_edges_uv fallback. Stagnation is not an error: the
+    # loop stops and returns the current mesh and factor.
     for it in range(max_iterations):
         EE, FF_m, GG = compute_first_fundamental_form(surface, V_cur)
         print_if_verbose(f"\n ---Initial remesh Iteration {it} ---")
+        mesh_factor = factor
         V_cur, F_cur, _ = mmg_remesh(
             V_cur, F_cur,
             EE=EE, FF_m=FF_m, GG=GG,
@@ -905,7 +1073,7 @@ def remesh_with_error_and_edge_metric(
         if prev_avg_error is not None and avg_error >= STAGNATION_RATIO * prev_avg_error:
             stagnation_count += 1
             if stagnation_count >= STAGNATION_LIMIT:
-                return V_cur, F_cur, factor
+                return V_cur, F_cur, mesh_factor
         else:
             stagnation_count = 0
         prev_avg_error = avg_error
@@ -927,11 +1095,11 @@ def remesh_with_error_and_edge_metric(
             print_if_verbose(f"  error {avg_error:.3e} << target {target_error:.3e}, "
                              f"scaling factor down by {ratio:.2e}x -> factor={factor:.3e}")
             if factor < 1e-8:
-                return V_cur, F_cur, factor/ratio
+                return V_cur, F_cur, mesh_factor
         else:
             break
 
-    return V_cur, F_cur, factor
+    return V_cur, F_cur, mesh_factor
 
 
 # ---------------------------------------------------------------------------
@@ -944,17 +1112,21 @@ def insert_feature_edges_uv(
     face,
     edge_geometry_data: dict,
     target_3d_length: float = 5e-2,
-    mmg2d_path: str = "mmg2d_O3",
+    mmg2d_path: Optional[str] = None,
     max_iterations: int = 5,
     base_factor: Optional[float] = None,
     local_finer_ratio: float = 10.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Iteratively refine the UV mesh near feature edges.
+    """Refine the UV mesh near feature edges (two MMG passes).
 
-    Each iteration: compute per-vertex average 3D edge length, find vertices
-    within an influence radius of feature edge points, halve their UV size
-    map, and re-run MMG.  Stops when 3D edges in the influence region are
-    shorter than ``0.1 * target_3d_length``, or after ``max_iterations``.
+    Collects the 3D feature-edge points (polyline vertices plus one
+    interpolated midpoint per segment), then:
+
+    1. remeshes the whole patch uniformly at a 3D edge length equal to the
+       median feature-point spacing;
+    2. if several feature points project (via nearest face centroid) onto the
+       same triangle, remeshes once more with the metric scaled up around
+       those triangles by their point count.
 
     Parameters
     ----------
@@ -962,14 +1134,10 @@ def insert_feature_edges_uv(
     F : (nf, 3) triangle connectivity from remeshing (0-based).
     face : abs Face object with ``.loops``, ``.surface``.
     edge_geometry_data : dict mapping edge_id -> (n, 3) refined 3D polyline.
-    target_3d_length : desired 3D edge length as fraction of bbox diagonal
-        (same convention as ``remesh_with_error_and_edge_metric``).
-    mmg2d_path : path to the mmg2d executable.
-    max_iterations : maximum refinement iterations.
-    base_factor : baseline tensor factor (if None, recomputed from current mesh).
-    local_finer_ratio : number of hallucinated (interpolated) points to
-        insert between each pair of consecutive feature edge vertices.
-        More points -> denser coverage -> finer mesh near features.
+    mmg2d_path : the mmg2d executable to run mmg with, or None (the default)
+        to run it in memory; see mmg_remesh.
+    target_3d_length, max_iterations, base_factor, local_finer_ratio : unused;
+        the baseline metric always comes from the feature-point spacing.
 
     Returns
     -------
@@ -1038,6 +1206,11 @@ def insert_feature_edges_uv(
     # Use half the median 3D feature-point spacing so consecutive points land
     # in distinct triangles.  Median (not mean) is robust to the highly
     # heterogeneous spacings.
+    if not edge_pt_spacings:
+        raise ValueError(
+            "insert_feature_edges_uv: every feature-edge segment of the face is "
+            f"shorter than GEOM_TOL = {GEOM_TOL:g}, so there is no feature "
+            "spacing to size the mesh from")
     L_target = float(np.median(edge_pt_spacings))
     base_factor = 1.0 / (L_target ** 2)
     # ------------------------------------------------------------------
@@ -1429,7 +1602,7 @@ def refine_background_for_feature_conflicts(
     F: np.ndarray,
     face,
     edge_geometry_data: dict,
-    mmg2d_path: str = "mmg2d_O3",
+    mmg2d_path: Optional[str] = None,
     beta: float = CONFLICT_BETA,
     max_halvings: int = CONFLICT_MAX_HALVINGS,
     periodic_sides=None,
@@ -1657,7 +1830,7 @@ def refine_cdt_with_size_field(
 
     # Stage 2 (Triangle 'rpa' interior scaffolding) removed: Ruppert's
     # encroachment rule splits constrained segments at midpoints with no
-    # lower bound, and near-coincident feature chords (22162 patch 79) drive
+    # lower bound, and near-coincident feature chords can drive
     # it to ~1e-12 required edges that send mmg2d into an infinite collapse
     # loop. The interior refinement it provided is scaffolding only — the
     # MMG loop right after applies the same size field and inserts interior
@@ -1666,7 +1839,7 @@ def refine_cdt_with_size_field(
     if splits:
         # _split_mesh_edges_at_points keeps the mesh conforming but produces
         # zero/negative-area triangles when the vertex opposite a split
-        # segment is (nearly) collinear with it (22832 patch 259: 7 inverted
+        # segment is (nearly) collinear with it (on one face, 7 inverted
         # + 17 near-zero fan triangles -> mmg2d infinite loop). Discard the
         # fan connectivity and rebuild it with a plain constrained Delaunay
         # triangulation of the SAME vertices and SAME constrained segments:
@@ -1687,6 +1860,8 @@ def refine_cdt_with_size_field(
                     np.asarray(result['triangles'], dtype=int),
                     np.asarray(result['segments'], dtype=int),
                     np.asarray(result['segment_markers'], dtype=int).reshape(-1))
+        except TimeoutError:
+            raise  # alarm_timeout fired: let it reach its caller
         except Exception as e:
             print_if_verbose(
                 f"[conflict-refine] plain CDT rebuild failed ({e}); "

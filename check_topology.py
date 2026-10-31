@@ -12,7 +12,6 @@ remeshed_edges.vtu in <output_folder>:
 Exits with status 1 if any check fails.
 """
 import argparse
-import json
 import os
 import sys
 from collections import defaultdict
@@ -157,11 +156,11 @@ def load_remeshed(folder):
 
     edges = meshio.read(os.path.join(folder, "remeshed_edges.vtu"))
     corner2vid = {}
-    for vid, c in enumerate(np.asarray(edges.point_data["corner_id"]).ravel()):
+    for vid, c in enumerate(np.asarray(edges.point_data["vertex_id"]).ravel()):
         if c >= 0:
-            corner2vid[int(c) - 1] = vid  # the remesher writes corner id + 1
+            corner2vid[int(c)] = vid
     lines = np.vstack([cb.data for cb in edges.cells if cb.type == "line"])
-    curve_ids = np.concatenate([np.asarray(a).ravel() for a in edges.cell_data_dict["curve_id"].values()])
+    curve_ids = np.concatenate([np.asarray(a).ravel() for a in edges.cell_data_dict["edge_id"].values()])
     edge2pairs = defaultdict(list)
     for (a, b), cid in zip(lines, curve_ids):
         if cid >= 0:
@@ -173,11 +172,13 @@ def load_remeshed(folder):
             edge2chain[eid] = ordered_chain(pairs, corner_vids)
         except ValueError as e:
             raise ValueError(f"Edge {eid}: {e}")
-    # zero-length B-rep edges have no segments: they are just their corner's vertex
-    with open(os.path.join(folder, "features.json")) as f:
-        degenerate = json.load(f).get("degenerate_feature_to_cid", {})
-    for eid, cid in degenerate.items():
-        edge2chain[int(eid)] = [corner2vid[int(cid)]]
+    # zero-length B-rep edges have no segments: they are just their corner's vertex. In fused.pkl,
+    # next to the remeshed mesh, their chain is that corner's vertex alone.
+    _, _, _, fused_chains, fused_corners = load_fused_output(os.path.join(folder, "fused.pkl"))[:5]
+    corner_of_vid = {vid: c for c, vid in fused_corners.items()}
+    for eid, chain in fused_chains.items():
+        if len(chain) < 2:
+            edge2chain[int(eid)] = [corner2vid[corner_of_vid[chain[0]]]]
     return F, patch2fid, edge2chain, corner2vid
 
 

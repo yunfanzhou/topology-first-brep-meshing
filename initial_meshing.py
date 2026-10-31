@@ -7,7 +7,7 @@ from collections import defaultdict
 from scipy.spatial import cKDTree
 from operations.internal_operations import split_edge_in_mesh_overloaded
 from operations.stitch import stitch_periodic_edges, stitch_periodic_edges_with_split, build_surface_merged_edges_with_apex
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 from utils.data_structures import (
     HalfEdge, LoopTopologyData, LoopGeometryData, PatchInputData, CornerData, SingularityData
 )
@@ -143,7 +143,7 @@ def init_grid_mesh(
     v_lower_bound: float,
     v_upper_bound: float,
     strip_width_ratio: float = DEFAULT_STRIP_WIDTH_RATIO,
-) -> Tuple[np.ndarray, np.ndarray, list]:
+) -> Tuple[np.ndarray, np.ndarray, dict, list]:
     """Create a structured UV grid mesh, optionally with singularity strip fans.
 
     Direct port of the C++ ``init_grid_mesh`` in TriMeshCADMeshing.cpp.
@@ -153,7 +153,7 @@ def init_grid_mesh(
     singularities : dict of singualrityid to singularity objects, where singularity objects have attributes:
          - ``first2d``: (u, v) coordinates of the singularity in the parametric domain.
          - ``uiso``: boolean, True if the singularity is u-isolated, False if v-isolated.
-         - ``point2d``: (u, v) coordinates of the singularity in the parametric domain (same as ``first2d
+         - ``point2d``: (u, v) coordinates of a point on the singular iso-line.
          - ``point3d``: (x, y, z) coordinates of the singularity in 3D space.
     strip_width_ratio : width of the fan region as a fraction of domain size.
 
@@ -164,10 +164,17 @@ def init_grid_mesh(
     F : ndarray, shape (nf, 3), dtype int
         Triangle connectivity (0-based).
     sing_info : dict of dict
-        Per-singularity bookkeeping needed by MMG:
-        ``center_vertex_id``,
-        ``left_boundary`` (1-based face ids),
-        ``right_boundary`` (1-based face ids).
+        Per-singularity bookkeeping (skipped singularities are left out):
+        ``center_vertex_id`` (-1 here, set when the fans are stitched) and
+        ``boundary_side`` ('left'/'right'/'bottom'/'top', None for an
+        interior singularity).
+    sub_domains : list of (ul, uu, vl, vu) tuples
+        Bounds of the produced grid(s): two for an interior singularity, one
+        otherwise, shrunk by the boundary-singularity strips.
+
+    Raises
+    ------
+    ValueError : more than one interior singularity (not supported).
     """
     stride = num_v_segments + 1
     grid_verts = (num_u_segments + 1) * stride
@@ -192,8 +199,8 @@ def init_grid_mesh(
         if sing['uiso']:
             u_val = start[0]
             if u_val < u_lower_bound - GEOMETRY_TOL or u_val > u_upper_bound + GEOMETRY_TOL:
-                print(f"  Singularity {idx} at u={u_val:.6f} outside domain "
-                      f"[{u_lower_bound:.6f}, {u_upper_bound:.6f}], skipping")
+                print_if_verbose(f"  Singularity {idx} at u={u_val:.6f} outside domain "
+                                 f"[{u_lower_bound:.6f}, {u_upper_bound:.6f}], skipping")
                 skipped_singularities.add(idx)
                 continue
             if abs(u_val - u_lower_bound) < GEOMETRY_TOL:
@@ -206,8 +213,8 @@ def init_grid_mesh(
         else:
             v_val = start[1]
             if v_val < v_lower_bound - GEOMETRY_TOL or v_val > v_upper_bound + GEOMETRY_TOL:
-                print(f"  Singularity {idx} at v={v_val:.6f} outside domain "
-                      f"[{v_lower_bound:.6f}, {v_upper_bound:.6f}], skipping")
+                print_if_verbose(f"  Singularity {idx} at v={v_val:.6f} outside domain "
+                                 f"[{v_lower_bound:.6f}, {v_upper_bound:.6f}], skipping")
                 skipped_singularities.add(idx)
                 continue
             if abs(v_val - v_lower_bound) < GEOMETRY_TOL:
@@ -223,6 +230,9 @@ def init_grid_mesh(
         n_segs[idx] = ns
 
         if not at_bnd:
+            if non_bnd_idx is not None:
+                raise ValueError(f"init_grid_mesh supports at most one interior singularity, "
+                                 f"found {non_bnd_idx} and {idx}")
             non_bnd_idx = idx
             extra_verts += grid_verts  # second grid
             extra_tris += grid_tris   # second grid (no fans)
@@ -297,7 +307,6 @@ def init_grid_mesh(
         # no non-boundary singularity – single grid
         fill_verts(0, u_lower_bound, u_upper_bound, v_lower_bound, v_upper_bound)
         fill_tris(0)
-        next_v = grid_verts
 
     # --- boundary singularity strips ------------------------------------------
     # Push grid boundary vertices inward to create a gap for later fan stitching.
@@ -383,11 +392,12 @@ def create_initial_mesh(
     v_lower: Optional[float] = None,
     v_upper: Optional[float] = None,
     strip_width_ratio: float = 0.01,
-) -> Tuple[np.ndarray, np.ndarray, list]:
-    """Create a high-quality initial mesh on a CAD patch.
+) -> Tuple[np.ndarray, np.ndarray, dict, bool, list]:
+    """Create the initial UV grid mesh on a CAD patch (no remeshing).
 
-    Port of ``TriMeshCADMeshing::create_good_quality_initial_mesh`` and
-    ``TriMeshCADMeshing::run_mmg_remesh_on_initial_mesh``.
+    Grid stage of the port of ``TriMeshCADMeshing::create_good_quality_initial_mesh``;
+    the MMG remesh (``run_mmg_remesh_on_initial_mesh``) is done by the caller.
+    If any bound is None, all four are taken from ``decide_trim_domain``.
 
     Parameters
     ----------
@@ -399,12 +409,14 @@ def create_initial_mesh(
 
     Returns
     -------
-    V : (nv, 2) remeshed UV vertices.
-    F : (nf, 3) remeshed triangle connectivity (0-based).
-    sing_info : list of dict with per-singularity ``center_vertex_id`` in the
-        remeshed mesh (empty list if no singularities).
+    uvs : (nv, 2) grid UV vertices.
+    F : (nf, 3) grid triangle connectivity (0-based).
+    sing_info : dict of per-singularity bookkeeping, see ``init_grid_mesh``
+        (empty dict if no singularities).
+    too_small : bool, True when the parametric domain is degenerate (only
+        checked when the bounds come from ``decide_trim_domain``).
+    sub_domains : list of (ul, uu, vl, vu) grid bounds, see ``init_grid_mesh``.
     """
-    surface = face.surface
     too_small = False
     # Get UV bounds
     if u_lower is None or u_upper is None or v_lower is None or v_upper is None:
@@ -590,9 +602,16 @@ def create_feature_edge_geometry_data(part,
     Parameters
     ----------
     part : ABS part object.
-    corner_id_to_position : dict mapping corner (vertex) id -> (3,) 3-D
-        position, read from the input B-rep data.
-    target_3d_length, target_error : refinement targets for ``refine_edge_mesh``.
+    corner_data : CornerData whose ``corner_id_to_position`` maps corner
+        (vertex) id -> (3,) 3-D position, read from the input B-rep data.
+    target_error : refinement target for ``refine_edge_mesh``.
+
+    Returns
+    -------
+    edge_geometry_data : dict edge id -> (n, 3) snapped polyline (empty for
+        degenerate edges).
+    edge_t_values : dict edge id -> curve parameters of the polyline samples
+        (only for edges meshed by ``refine_edge_mesh``).
     """
     edge_geometry_data = {}
     edge_t_values = {}
@@ -654,30 +673,6 @@ def create_feature_edge_geometry_data(part,
                 P, target_start, target_end
             )
 
-    # --- segment length ratio check ---
-    # for edge_id, P in edge_geometry_data.items():
-    #     if P is None or len(P) < 2:
-    #         continue
-    #     P_np = np.asarray(P)
-    #     seg_lengths = np.linalg.norm(np.diff(P_np, axis=0), axis=1)
-    #     nonzero = seg_lengths[seg_lengths > 0]
-    #     if len(nonzero) < 2:
-    #         continue
-    #     ratio = nonzero.max() / nonzero.min()
-    #     if ratio > 10:
-    #         print(f"\n  !!!!![edge_geometry] edge {edge_id}: max/min segment length ratio = {ratio:.1f} "
-    #               f"(max={nonzero.max():.4e}, min={nonzero.min():.4e})")
-    #         import pyvista as pv
-    #         # one polyline using all points in order
-    #         n = P_np.shape[0]
-    #         lines = np.hstack([[2, i, i + 1] for i in range(n - 1)])
-    #         mesh = pv.PolyData(P_np, lines=lines)
-
-    #         mesh.plot(render_lines_as_tubes=True, line_width=3, color="blue",
-    #                 render_points_as_spheres=True, point_size=10)
-
-    # --- end segment length ratio check ---
-
     return edge_geometry_data, edge_t_values
 
 def initial_mesh_simple_processing(V_uv, F,
@@ -691,7 +686,7 @@ def initial_mesh_simple_processing(V_uv, F,
     Parameters
     ----------
     sub_domains : list of (ul, uu, vl, vu) sub-domain bounds.
-        First entry's bounds are used for periodic edge detection.
+        Their overall bounds are used for periodic edge detection.
         Gap-facing boundaries are used to find interior singularity edges.
     """
     # Use full domain bounds (first sub-domain for outer boundary detection)
@@ -715,7 +710,6 @@ def initial_mesh_simple_processing(V_uv, F,
         u_periodic_edges = []
         v_periodic_edges = []
 
-    F_uv = [row[:] for row in connectivity.F]
     bnd_edges = _get_boundary_edges(F)
     sing_edges = {}
     for idx, info in sing_info.items():
@@ -933,18 +927,18 @@ def detect_collapsed_iso_lines(face, V_uv, F, bounds, u_periodic, v_periodic,
         rec, _ = _iso_line_record(face.surface, uiso, val, run_lo, run_hi)
         key = f"{len(records):03d}"
         records[key] = rec
-        print(f"  posterior singularity #{key}: {where} iso-line "
-              f"{'u' if uiso else 'v'}={val:.6g} collapses to "
-              f"{np.round(rec['point3d'], 6).tolist()} (lifted length {chain:.2e}, "
-              f"tol {tol_3d:.2e})")
+        print_if_verbose(f"  posterior singularity #{key}: {where} iso-line "
+                         f"{'u' if uiso else 'v'}={val:.6g} collapses to "
+                         f"{np.round(rec['point3d'], 6).tolist()} (lifted length {chain:.2e}, "
+                         f"tol {tol_3d:.2e})")
     return records
 
 
 def _run_initial_meshing_for_face(
     face,
     edge_geometry_data: dict,
-    target_error: Optional[float] = 5e-2,
-    mmg2d_path: str = "mmg2d_O3",
+    target_error: float = 5e-2,
+    mmg2d_path: Optional[str] = None,
     num_u_segments: int = 8,
     num_v_segments: int = 8,
     prev_V_uv = None, prev_F = None,
@@ -953,7 +947,7 @@ def _run_initial_meshing_for_face(
     feature_conflict_refine: bool = True,
     model_diag: Optional[float] = None,
     _posterior_singularity_done: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, tuple, tuple, dict]:
+) -> tuple:
     """Run the full initial meshing pipeline for one CAD face.
 
     Mirrors the C++ ``meshing_patch`` function: creates a UV grid, refines it
@@ -965,7 +959,10 @@ def _run_initial_meshing_for_face(
     face : abs Face object.
     edge_geometry_data : dict mapping edge id -> (nv, 3) 3-D polyline array,
         as returned by ``create_feature_edge_geometry_data``.
-    mmg2d_path : path to the mmg2d executable.
+    target_error : absolute error target of the mmg remeshing; not used on
+        retries (attempt > 0).
+    mmg2d_path : the mmg2d executable to run mmg with, or None (the default)
+        to run it in memory; see operations.remesh_background.mmg_remesh.
     num_u_segments, num_v_segments : initial grid resolution.
     prev_V_uv, prev_F : UV mesh from previous attempt, used on retry
         (attempt > 0) to skip mmg remeshing and upsample instead.
@@ -976,24 +973,29 @@ def _run_initial_meshing_for_face(
 
     Returns
     -------
-    V_uv : (nv, 2) UV vertex positions.
-    F : (nf, 3) triangle connectivity (0-based).
-    u_periodic_edges : (list_side0, list_side1) vertex-id pairs for the
-        u-periodic seam (empty lists when the surface is not u-periodic).
-    v_periodic_edges : (list_side0, list_side1) vertex-id pairs for the
-        v-periodic seam (empty lists when the surface is not v-periodic).
-    sing_info : dict mapping singularity index -> {"center_vertex_id": int}
-        populated by ``stitch_singularity_fans`` (empty dict when no singularities).
+    V_3d : list of (x, y, z) vertex positions of the stitched 3-D mesh.
+    F : (nf, 3) triangle connectivity (0-based) of the stitched 3-D mesh.
+    merged_u_vertices, merged_v_vertices : vertex ids merged along the u / v
+        seam (empty when the surface is not periodic in that direction).
+    sing_info : dict mapping singularity index -> {"boundary_side": ...,
+        "center_vertex_id": int}, the center vertex set by
+        ``stitch_singularity_fans_3d`` (empty dict when no singularities).
+    surface_merged_edges : seam edges from ``build_surface_merged_edges_with_apex``.
+    V_uv_fallback, F_fallback, fallback_sub_domains : the UV mesh and its
+        sub-domain bounds to pass back as prev_V_uv / prev_F / prev_sub_domains
+        on the next attempt; None on retries (attempt > 0) and on too-small
+        domains.
     """
     # Keep the caller's target for the posterior re-run below: the curvature
     # cap floors at target/256, so feeding the capped value back in would
-    # divide by 256 again on singular faces (face 56 of 00003039 went from
-    # 6.8e-5 to 2.7e-7 and mmg ran away).
+    # divide by 256 again on singular faces (the target collapses by orders of
+    # magnitude and mmg runs away).
     target_error_in = target_error
     # Curvature cap: the effective error target may not exceed a fraction of
     # the surface's minimum principal-curvature radius, or the background mesh
     # leaves the surface's reach and projections of nearby features alias.
-    if target_error is not None:
+    # Retries (attempt > 0) run no mmg and do not use the target.
+    if attempt == 0:
         capped = curvature_capped_error(face.surface, target_error)
         if capped < target_error:
             print_if_verbose(
@@ -1037,9 +1039,11 @@ def _run_initial_meshing_for_face(
     # Defaults so the except path below has coherent state if any of the
     # pre-embedding steps (initial remesh, sub-domain remesh, seam
     # stitching) raise before V_uv_fallback / F_fallback / final_factor /
-    # sub_domains have been computed.
+    # sub_domains have been computed. fallback_sub_domains always describes
+    # V_uv_fallback / F_fallback: the three are updated together.
     V_uv_fallback = uvs.copy() if isinstance(uvs, np.ndarray) else np.array(uvs)
     F_fallback = F.copy() if isinstance(F, np.ndarray) else np.array(F)
+    fallback_sub_domains = sub_domains_initial
     final_factor = None
     sub_domains = sub_domains_initial
     padding_ratio = None
@@ -1054,7 +1058,7 @@ def _run_initial_meshing_for_face(
     F_grid = F
     try:
         while True:
-            print(". =============== manifold attempt #{}: target_error={:.3e}".format(manifold_refine_times, target_error * 0.5**manifold_refine_times))
+            print_if_verbose(f". =============== manifold attempt #{manifold_refine_times}: target_error={target_error * 0.5**manifold_refine_times:.3e}")
             V_uv, F, final_factor = remesh_with_error_and_edge_metric(
                 face.surface, uvs, F_grid, target_error=target_error * 0.5**manifold_refine_times,
                 hgrad=1.5,
@@ -1103,6 +1107,7 @@ def _run_initial_meshing_for_face(
             # Save pre-embed mesh for fallback (before list conversion / seam alignment)
             V_uv_fallback = V_uv.copy() if isinstance(V_uv, np.ndarray) else np.array(V_uv)
             F_fallback = F.copy() if isinstance(F, np.ndarray) else np.array(F)
+            fallback_sub_domains = sub_domains
             # convert V_uv and F to list if not yet
             V_uv = V_uv.tolist() if isinstance(V_uv, np.ndarray) else V_uv
             F = F.tolist() if isinstance(F, np.ndarray) else F
@@ -1127,14 +1132,14 @@ def _run_initial_meshing_for_face(
                 break
             if manifold_ok and valid_ok:
                 # Wrong boundary-loop count is a topology defect: refining
-                # cannot change it, so retrying only burns time (face 56 of
-                # 00003039 spent 3.6 h and 1.3M vertices this way).
-                print("  boundary loop count mismatch after stitching; "
-                      "refinement cannot fix topology, stopping manifold retries")
+                # cannot change it, so retrying only burns time (hours and
+                # millions of vertices on a bad face).
+                print_if_verbose("  boundary loop count mismatch after stitching; "
+                                 "refinement cannot fix topology, stopping manifold retries")
                 break
             if manifold_refine_times + 1 >= manifold_refine_max:
-                print(f"  giving up manifold retries after {manifold_refine_max} rounds "
-                      f"(manifold={manifold_ok}, valid={valid_ok}, topology={topology_ok})")
+                print_if_verbose(f"  giving up manifold retries after {manifold_refine_max} rounds "
+                                 f"(manifold={manifold_ok}, valid={valid_ok}, topology={topology_ok})")
                 break
             # Non-manifold edges survived stitching. Tighten the remesh
             # (target_error scales by 0.5**manifold_refine_times) so the next
@@ -1144,7 +1149,7 @@ def _run_initial_meshing_for_face(
         V_3d_arr = fix_nonmanifold_after_stitch(V_uv, F_uv, F_3d_list, face.surface)
         V_3d_list = V_3d_arr.tolist()
         if not igl.is_edge_manifold(np.array(F_3d_list)):
-            print("Non-manifold edges remain after initial remesh. ")
+            print_if_verbose("Non-manifold edges remain after initial remesh. ")
         with alarm_timeout(EMBED_TIMEOUT_SECONDS):
             V_mmg, F_mmg, tagged_edges = embed_loops_one_patch(V_uv,
                                                 V_3d_list,
@@ -1171,6 +1176,7 @@ def _run_initial_meshing_for_face(
         F_mmg_list = F_mmg.tolist()
         V_uv_fallback = np.array(V_mmg_list)
         F_fallback = np.array(F_mmg_list)
+        fallback_sub_domains = sub_domains
         connectivity = construct_connectivity_data(V_mmg_list, F_mmg_list)
         u_periodic_edges, v_periodic_edges = align_seam_edges_from_tags(
             V_mmg_list, connectivity,
@@ -1211,10 +1217,10 @@ def _run_initial_meshing_for_face(
             F_3d = connectivity.F
 
         if not igl.is_edge_manifold(np.array(F_3d)):
-            print("Non-manifold edges remain after embedding and stitching. ")
+            print_if_verbose("Non-manifold edges remain after embedding and stitching. ")
         surface_merged_edges = build_surface_merged_edges_with_apex(
             merged_u_sub_chains, merged_v_sub_chains, face, sing_info)
-        return V_3d_list, F_3d, merged_u_vertices, merged_v_vertices, sing_info, surface_merged_edges, V_uv_fallback, F_fallback, sub_domains
+        return V_3d_list, F_3d, merged_u_vertices, merged_v_vertices, sing_info, surface_merged_edges, V_uv_fallback, F_fallback, fallback_sub_domains
     except _PosteriorSingularityDetected as det:
         face.singularities = det.records
         print_if_verbose(f"  re-running face {face.id} with {len(det.records)} "
@@ -1230,10 +1236,10 @@ def _run_initial_meshing_for_face(
         warnings.warn(f"initial meshing failed ({type(e).__name__}: {e}), falling back to insert_feature_edges_uv on pre-embedding mesh")
         V_embedded, F_embedded = insert_feature_edges_uv(np.array(V_uv_fallback), np.array(F_fallback), face, edge_geometry_data, mmg2d_path=mmg2d_path, base_factor=final_factor)
         result = initial_mesh_simple_processing(
-            V_embedded, F_embedded, face, sub_domains,
+            V_embedded, F_embedded, face, fallback_sub_domains,
             u_periodic, v_periodic, sing_info)
-        
-        return (*result, V_uv_fallback, F_fallback, sub_domains)
+
+        return (*result, V_uv_fallback, F_fallback, fallback_sub_domains)
 
 
 def run_initial_meshing_for_face(face, *args, **kwargs):
@@ -1317,7 +1323,7 @@ def refine_for_singularity_boundary(V_uv, F_uv, face, sub_domain_bounds):
         ]
         if len(side_edges) < 3:
             upsample_level = 3 - len(side_edges)
-            print(f" upsampling boundary at axis={axis} target={side_target:.6f} with level {upsample_level}")
+            print_if_verbose(f" upsampling boundary at axis={axis} target={side_target:.6f} with level {upsample_level}")
             V_uv, F_uv = igl.upsample(np.array(V_uv), np.array(F_uv), upsample_level)
 
     return V_uv, F_uv
@@ -1340,6 +1346,8 @@ def decide_trim_domain(face, sub_domains=None, target_edge_length=None):
     sub_domains : list of (u_lower, u_upper, v_lower, v_upper) tuples
     padding_ratio : float or None (for boundary singularities)
     too_small : bool
+    interior_singularity_idx : int or None, the singularity the domain is
+        split around
     """
     surface = face.surface
     padding_ratio = None
@@ -1375,7 +1383,6 @@ def decide_trim_domain(face, sub_domains=None, target_edge_length=None):
 
         # Guard against degenerate parametric domains (Triangle does not support small meshes)
         if (abs(u_upper - u_lower) < TOPOLOGY_TOL or abs(v_upper - v_lower) < TOPOLOGY_TOL):
-            import warnings
             warnings.warn(
                 f"The parametric domain of face {face} is too small. "
                 f"u size {u_upper - u_lower} v size {v_upper - v_lower}"
@@ -1445,7 +1452,6 @@ def singularity_adaptive_padding_ratio(face,
     and the interior strip ratio.
     """
     INITIAL_RATIO = 0.20
-    DEFAULT_RATIO = 0.01
     MAX_BISECT_ITERS = 20
     REL_TOL = 0.1  # 10% relative tolerance
 
@@ -1520,7 +1526,7 @@ def singularity_adaptive_padding_ratio(face,
                 else:
                     ratio_hi = _bisect_ratio(test_fn_interior_u_hi, min(INITIAL_RATIO, max_ratio_hi))
                 interior_strip_ratio = (ratio_lo, ratio_hi)
-                print(f"Singularity {idx}: interior u strip ratios = ({ratio_lo:.4f}, {ratio_hi:.4f})")
+                print_if_verbose(f"Singularity {idx}: interior u strip ratios = ({ratio_lo:.4f}, {ratio_hi:.4f})")
             else:
                 # Boundary singularity
                 def test_fn_boundary_u(r, _at_min=at_min):
@@ -1532,7 +1538,7 @@ def singularity_adaptive_padding_ratio(face,
                     adj_u_l = u_l + ratio * domain_size
                 else:
                     adj_u_u = u_u - ratio * domain_size
-                print(f"Singularity {idx}: u adjusted padding ratio = {ratio:.3f}")
+                print_if_verbose(f"Singularity {idx}: u adjusted padding ratio = {ratio:.3f}")
 
         else:  # v-iso singularity
             v_val = start[1]
@@ -1567,7 +1573,7 @@ def singularity_adaptive_padding_ratio(face,
                 else:
                     ratio_hi = _bisect_ratio(test_fn_interior_v_hi, min(INITIAL_RATIO, max_ratio_hi))
                 interior_strip_ratio = (ratio_lo, ratio_hi)
-                print(f"Singularity {idx}: interior v strip ratios = ({ratio_lo:.4f}, {ratio_hi:.4f})")
+                print_if_verbose(f"Singularity {idx}: interior v strip ratios = ({ratio_lo:.4f}, {ratio_hi:.4f})")
             else:
                 # Boundary singularity
                 def test_fn_boundary_v(r, _at_min=at_min):
@@ -1579,7 +1585,7 @@ def singularity_adaptive_padding_ratio(face,
                     adj_v_l = v_l + ratio * domain_size
                 else:
                     adj_v_u = v_u - ratio * domain_size
-                print(f"Singularity {idx}: v adjusted padding ratio = {ratio:.3f}")
+                print_if_verbose(f"Singularity {idx}: v adjusted padding ratio = {ratio:.3f}")
 
     return adj_u_l, adj_u_u, adj_v_l, adj_v_u, ratio, interior_strip_ratio
 
@@ -1602,7 +1608,7 @@ def split_singularity_edges(V, connectivity, sing_edges):
                 new_vid = len(V) - 1
                 edges.append((e[0], new_vid))
                 edges.append((new_vid, e[1]))
-                print(f"Updated singularity edge {e} to {(e[0], new_vid)} and {(new_vid, e[1])} in singularity index {idx} after splitting edge {e}")
+                print_if_verbose(f"Updated singularity edge {e} to {(e[0], new_vid)} and {(new_vid, e[1])} in singularity index {idx} after splitting edge {e}")
 
 def build_singularity_data_from_face(face, sing_info: dict):
     """Build a list of SingularityData from the meshed sing_info and ABS face.
@@ -1634,8 +1640,8 @@ def build_singularity_data_from_face(face, sing_info: dict):
 def build_corner_data_from_abs_part(part) -> CornerData:
     """Build corner_id -> 3-D position mapping from ABS solid topology.
 
-    Corner positions are taken from the first and last point of the 3-D edge
-    polylines already computed by ``create_feature_edge_geometry_data``.
+    Corner positions are the B-rep vertex positions (``part.vertices[0]``);
+    ``create_feature_edge_geometry_data`` snaps the edge polylines to them.
     """
     corner_id_to_position = {}
     for id, vertex in enumerate(part.vertices[0]):
@@ -1672,19 +1678,17 @@ def build_patch_input_data_from_abs_face(
 ) -> PatchInputData:
     """Package initial-meshing outputs and ABS topology into a PatchInputData.
 
-    Mirrors the data assembled by ``load_input_data`` for the HDF5 pipeline.
-
     Parameters
     ----------
-    face : abs Face object.  ``face.out_loop`` gives the outer loop id.
+    face : abs Face object.  ``face.outer_loop`` gives the outer loop id.
     edge_geometry_data : dict edge.id -> (nv, 3) ndarray in True orientation.
-    V_uv, F : mesh from ``run_initial_meshing_for_face``.
-    u_periodic_edges, v_periodic_edges : seam pairs from the same function.
+    V_3d, F : mesh from ``run_initial_meshing_for_face``.
+    u_periodic_edges, v_periodic_edges : merged seam vertex ids from the same function.
     """
     patch_loop_topology_data = {}
     patch_loop_geometry_data = {}
 
-    # face.out_loop is the outer (boundary) loop id.
+    # face.outer_loop is the outer (boundary) loop id.
     initial_loop_id = face.outer_loop
 
     for loop in face.loops:
@@ -1741,49 +1745,3 @@ def build_patch_input_data_from_abs_face(
         v_periodic_edges=v_periodic_edges,
         surface_merged_edges=surface_merged_edges or [],
     )
-
-
-def main():
-    import argparse
-    from abs import read_parts
-
-    parser = argparse.ArgumentParser(description="Create initial meshes for all faces in a CAD part.")
-    parser.add_argument("hdf5_file", type=str, help="Path to the HDF5 CAD file")
-    parser.add_argument("--part", type=int, default=0, help="Part index (default: 0)")
-    parser.add_argument("--mmg2d", type=str, default="mmg2d_O3", help="Path to mmg2d executable")
-    args = parser.parse_args()
-
-    parts = read_parts(args.hdf5_file)
-    part = parts[args.part]
-    # --- Corner positions from B-rep vertices ---
-    all_corners = build_corner_data_from_abs_part(part)
-
-    # --- Edge meshing ---
-    edge_geometry_data, edge_t_values = create_feature_edge_geometry_data(
-        part, all_corners, target_3d_length=5e-2, target_error=5e-2
-    )
-
-    # --- Face meshing ---
-    results = {}
-    for i, face in enumerate(part.Solid.faces):
-        print(f"  Face {i}: ", end="")
-        try:
-            V_uv, F, u_periodic_edges, v_periodic_edges, sing_info, *_ = run_initial_meshing_for_face(
-                face, edge_geometry_data, mmg2d_path=args.mmg2d
-            )
-            n_seam = len(u_periodic_edges[0]) + len(v_periodic_edges[0])
-            if n_seam:
-                print(f"{n_seam} seam vertex pairs aligned, ", end="")
-            V_3d = face.surface.sample(V_uv)
-            V_uv_3d = np.hstack([V_uv, np.zeros((V_uv.shape[0], 1))])
-            plot_mesh_with_trace(V_uv_3d, F)
-            plot_mesh_with_trace(V_3d, F)
-            print(f"{V_uv.shape[0]} vertices, {F.shape[0]} triangles")
-        except Exception as e:
-            print(f"FAILED - {e}")
-
-    return results
-
-
-if __name__ == "__main__":
-    main()

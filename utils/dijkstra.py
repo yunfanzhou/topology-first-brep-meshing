@@ -3,7 +3,7 @@ import heapq
 import numpy as np
 from utils.mesh_utils import create_edge
 from collections import deque
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 def bfs(adj_list, source_vid, target_vid, prohibited_vids: set = None):
     prohibited_contains_source = False
     prohibited_contains_target = False
@@ -32,7 +32,7 @@ def bfs(adj_list, source_vid, target_vid, prohibited_vids: set = None):
 
     # Step 3: Reconstruct the path
     if target_vid not in parent:
-        print("No path found between source_vid and target_vid in the prohibited region.")
+        print_if_verbose("No path found between source_vid and target_vid in the prohibited region.")
         if prohibited_contains_source:
             prohibited_vids.add(source_vid)
         if prohibited_contains_target:
@@ -52,18 +52,19 @@ def bfs(adj_list, source_vid, target_vid, prohibited_vids: set = None):
 
 def dijkstra_construct_network(edge_lengths, adj_list, source_vid, target_vid, prohibited_vids):
     """
-    Finds the shortest path from source_vid to target_vid using Dijkstra's algorithm,
-    skipping prohibited vertices.
+    Runs Dijkstra's algorithm from source_vid, skipping prohibited vertices.
 
     Parameters:
-    - edge_lengths: (M, 3) array of edge lengths, where each row corresponds to edges [1,2], [2,0], [0,1] of F.
-    - adj_list: List of lists, where adj_list[i] contains the adjacent vertices of vertex i.
+    - edge_lengths: dict mapping an edge (min vid, max vid), as built by create_edge, to its length.
+    - adj_list: List of sets, where adj_list[i] contains the adjacent vertices of vertex i.
     - source_vid: Start vertex ID.
-    - target_vid: End vertex ID.
+    - target_vid: End vertex ID; the search stops once it is settled. -1 explores the whole reachable region.
     - prohibited_vids: Set of vertex IDs that should not be visited.
 
     Returns:
-    - List of vertices representing the shortest path, or an empty list if unreachable.
+    - (distance, parent): dicts over all vertex IDs with the shortest distance from source_vid
+      (np.inf if unreachable) and the predecessor on the shortest path (-1 for none).
+      Use reconstruct_shortest_path(parent, target_vid) to get the path.
     """
     pq = []  # Min-heap priority queue
     distance = {v: np.inf for v in range(len(adj_list))}
@@ -78,8 +79,6 @@ def dijkstra_construct_network(edge_lengths, adj_list, source_vid, target_vid, p
         current_distance, current_vid = heapq.heappop(pq)
         if current_vid in visited:
             continue
-        # if current_vid != source_vid and current_vid in prohibited_vids:
-        #     continue
         visited.add(current_vid)
         # Stop if we reached the target if target_vid is not -1
         if target_vid != -1 and current_vid == target_vid:
@@ -90,17 +89,15 @@ def dijkstra_construct_network(edge_lengths, adj_list, source_vid, target_vid, p
             if neighbor_vid in visited or neighbor_vid in prohibited_vids:
                 continue
 
-            # Find edge length from F and edge_lengths
-            # edge = frozenset([current_vid, neighbor_vid])
+            # Find edge length from edge_lengths
             edge = create_edge(current_vid, neighbor_vid)
             edge_length = edge_lengths.get(edge)
 
             if edge_length is None:
-                print_if_verbose(f"adj[{current_vid}]:", adj_list[current_vid])
-                print_if_verbose(f"adj[{neighbor_vid}]:", adj_list[neighbor_vid])
+                print_if_verbose(f"adj[{current_vid}]: {adj_list[current_vid]}")
+                print_if_verbose(f"adj[{neighbor_vid}]: {adj_list[neighbor_vid]}")
                 print_if_verbose(f"     dijkstra_construct_network: Edge {edge} not found in edge_lengths")
                 raise Exception(f"Edge {edge} not found in edge_lengths")
-                continue  # Edge not found, skip
 
             # Relaxation step
             new_distance = current_distance + edge_length
@@ -122,7 +119,7 @@ def dijkstra_shortest_path_to_single_target(edge_lengths, adj_list, source_vid, 
     distance, parent = dijkstra_construct_network(edge_lengths, adj_list, source_vid, target_vid, prohibited_vids)
     # If target is unreachable
     if distance[target_vid] == np.inf:
-        print(f"No path found from {source_vid} to {target_vid}")
+        print_if_verbose(f"No path found from {source_vid} to {target_vid}")
         # Add back the source and target vids to prohibited vids if they were originally present
         if prohibited_contains_source:
             prohibited_vids.add(source_vid)
@@ -147,37 +144,6 @@ def reconstruct_shortest_path(parent, target_vid):
         v = parent[v]
     path.reverse()
     return path
-
-
-def bfs_reachable(adj_list, start_vertices, prohibited_vids):
-    """
-    adj_list: List[List[int]]
-        Vertex adjacency list.
-    start_vertices: set[int]
-        BFS sources (e.g. loop_A).
-    prohibited_vids: set[int]
-        Vertices that cannot be traversed.
-    Returns:
-        set[int]: all reachable vertices.
-    """
-    visited = set()
-    q = deque()
-
-    for v in start_vertices:
-        if v in prohibited_vids:
-            continue
-        visited.add(v)
-        q.append(v)
-
-    while q:
-        u = q.popleft()
-        for n in adj_list[u]:
-            if n in visited or n in prohibited_vids:
-                continue
-            visited.add(n)
-            q.append(n)
-
-    return visited
 
 
 def dijkstra_shortest_path_between_loops(edge_lengths, adj_list, loop_A, loop_B, prohibited_vids=None, frozen_edge_set=None):
@@ -225,7 +191,6 @@ def dijkstra_shortest_path_between_loops(edge_lengths, adj_list, loop_A, loop_B,
             if edge_len is None:
                 print_if_verbose(f"dijkstra_shortest_path_between_loops: Edge {edge_key} not found in edge_lengths")
                 raise Exception(f"Edge {edge_key} not found in edge_lengths")
-                continue  # Edge not found, skip
             alt = dist_u + edge_len
             if alt < distance[v]:
                 distance[v] = alt
@@ -233,29 +198,5 @@ def dijkstra_shortest_path_between_loops(edge_lengths, adj_list, loop_A, loop_B,
                 heapq.heappush(heap, (alt, v))
 
     # If we reach here, no path found
-    print("No path found between loops")
-    # DEBUG
-
-
-    reachable = bfs_reachable(
-        adj_list,
-        set(loop_A),
-        prohibited_vids - set(loop_A) - set(loop_B)
-    )
-
-    print("reachable size:", len(reachable))
-    print("blocked neighbors:")
-    set_unblocking = set()
-    for v in reachable:
-        for n in adj_list[v]:
-            if n not in reachable:
-                if frozen_edge_set is not None and create_edge(v, n) not in frozen_edge_set:
-                    set_unblocking.add(create_edge(v, n))
-    print("unblocking edges number:", len(set_unblocking))
-    # print("try BFS instead")
-    # return find_any_path_between_loops(adj_list,
-    #                                               loop_A,
-    #                                               loop_B,
-    #                                               prohibited_vids,
-    #                                               frozen_edge_set)
+    print_if_verbose("No path found between loops")
     return []

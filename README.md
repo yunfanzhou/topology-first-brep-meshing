@@ -1,5 +1,7 @@
 # Topology-First B-Rep Meshing
 
+[![CI](https://github.com/yunfanzhou/topology-first-brep-meshing/actions/workflows/ci.yml/badge.svg)](https://github.com/yunfanzhou/topology-first-brep-meshing/actions/workflows/ci.yml)
+
 Triangle meshing of B-rep CAD models that preserves the model's topology: every B-rep face becomes a
 patch of triangles, every B-rep edge a chain of mesh edges, and every B-rep vertex a mesh vertex.
 The pipeline has two stages:
@@ -7,12 +9,14 @@ The pipeline has two stages:
 1. **Forward stage** (`main.py`, Python): meshes each face in its parameter domain, traces the face's
    boundary edges into the mesh, aligns the shared edges of adjacent faces, and fuses all patches into one
    conforming mesh (`fused.pkl`).
-2. **Remeshing stage** (`remeshing/remesh.py`): remeshes the fused mesh to a target edge length with the
-   wildmeshing-toolkit remeshing app, keeping patches, feature chains and corners.
+2. **Remeshing stage** (`remeshing/remesh.py`): remeshes the fused mesh to a target edge length with
+   wildmeshing-toolkit's isotropic remeshing, in memory, keeping patches, feature chains and corners.
 
 ## Install
 
-Python 3.11:
+Python 3.11. The models are read with abs-hdf5, which has packages only for Python 3.9 to 3.11; the pipeline
+uses its 0.2 API (`requirements.txt` pins 0.2.2), which abs-hdf5 1.0 changed (`part.Solid` became
+`part.solids`).
 
 ```
 pip install -r requirements.txt
@@ -23,13 +27,18 @@ geodesic tracing between points on faces and edges. It is built from source, so 
 The PyPI release of pygeodesic does not work with this pipeline; `main.py` stops with an ImportError if it
 is installed.
 
-Prebuilt macOS arm64 binaries of the two C++ tools the pipeline calls are in `bin/macos-arm64/`:
-`mmg2d_O3` (forward stage) and `remeshing_app` (remeshing stage). On other platforms, build them and pass
-their paths:
+The two C++ tools the pipeline calls also come from `requirements.txt`:
 
-- Mmg: https://github.com/MmgTools/mmg, then `main.py --mmg2d_path <path to mmg2d_O3>`
-- wildmeshing-toolkit, branch `fpir`: https://github.com/wildmeshing/wildmeshing-toolkit, configured with
-  `-DWMTK_APP_SEC=ON`, target `remeshing_app`; then `remeshing/remesh.py --app <path to remeshing_app>`
+- Mmg 5.8.0 (forward stage) comes with the mmgpy package. By default `main.py` runs it in memory through
+  mmgpy, in a helper process per worker, which kills a run longer than an hour (`mmg_timeout_seconds` in
+  `utils/config.py`). `--mmg binary` runs its `mmg2d_O3` executable on files instead, the one in the
+  mmgpy package or the build `--mmg2d_path` names; the meshes are the same, bit for bit.
+- The isotropic remeshing (remeshing stage) is wildmeshing-toolkit's Python package `wildmeshing`, which
+  pip builds from source (pinned commit). This needs git, a C++17 compiler (the Xcode command-line tools on
+  macOS, g++ or clang on Linux, Visual Studio on Windows) and GMP on Linux (`apt install libgmp-dev`) and
+  macOS (`brew install gmp`); on Windows the build downloads GMP. CMake comes from PyPI. The build
+  downloads about 30 dependencies and takes several minutes (about 4 on a 16-core laptop), with about 2.5
+  GB of memory per compile job; set `CMAKE_BUILD_PARALLEL_LEVEL` on smaller machines.
 
 ## Run
 
@@ -43,7 +52,8 @@ python check_topology.py data/simple/Box.hdf5 out/Box
 ```
 
 `--error_rel` is the forward stage's target geometric error and `--len_rel` the remeshing target edge length,
-both relative to the bounding box diagonal. Use the same value for both.
+both relative to the bounding box diagonal. Use the same value for both; both default to 1e-3. The examples
+use 0.05, which is coarse and fast.
 
 `main.py` meshes the faces in parallel, one process per CPU by default; `--workers N` sets the number of
 processes (`--workers 1` runs serially). The output is the same for any number of workers.
@@ -62,8 +72,13 @@ The forward stage writes `out/<model>/fused.pkl`, a pickled tuple
 - `feature_edge_id_to_vids`: B-rep edge id to its chain of vertex ids
 - `corner_id_to_vids`: B-rep vertex id to its mesh vertex id
 
-plus `result.json` (per-face status and timings). The remeshing stage adds
-`remeshed.vtu` (triangles with a per-triangle patch id) and `remeshed_edges.vtu` (feature chains and corners).
+plus `result.json` (per-face status and timings). The remeshing stage adds:
+
+- `remeshed.vtu`: the remeshed triangles, with cell data `patch_id` (B-rep face id) and point data
+  `vertex_id` (B-rep vertex id of the corner vertices, -1 elsewhere)
+- `remeshed_edges.vtu`: the same points and one line per edge of a feature chain, with cell data `edge_id`
+  (B-rep edge id); zero-length B-rep edges are only their corner vertex
+- `remeshed_report.json`: statistics of the remeshing
 
 ## Evaluation scripts
 
@@ -72,13 +87,27 @@ plus `result.json` (per-face status and timings). The remeshing stage adds
 - `plot_metrics.py`: histograms of the CSVs those two write
 - `parse_results.py`: success and timing summary of a batch of `result.json` files
 
+For example, on the outputs of all models in `data/simple` (each in `out/<model>`):
+
+```
+python get_distance.py -i out --cad-root data/simple -o out/distance.csv
+python get_metrics.py -i out -o out/metrics.csv
+python plot_metrics.py -i out/metrics.csv out/distance.csv -o out/plots --format html
+python parse_results.py out
+```
+
+`plot_metrics.py` writes PNG by default, which needs `pip install kaleido`; `--format html` does not.
+
 ## Tests
 
 ```
 pytest tests
 ```
 
+CI (`.github/workflows/ci.yml`) runs the tests on Linux, macOS and Windows, and both stages, the topology
+check and the evaluation scripts on every model in `data/simple`.
+
 ## License
 
-MIT, see `LICENSE`. The binaries in `bin/` are third-party software under their own licenses (Mmg and GMP
-are LGPL-3.0); see `third_party/README.md`.
+MIT, see `LICENSE`. The C++ tools the pipeline calls are third-party software under their own licenses
+(Mmg is LGPL-3.0); see `third_party/README.md`.

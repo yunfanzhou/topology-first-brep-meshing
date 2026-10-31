@@ -1,15 +1,3 @@
-import argparse
-import os
-import random
-import sys
-import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
-
-import igl
-import meshio
-import numpy as np
-import pandas as pd
-
 """
 Per-triangle mesh quality metrics for remeshed outputs (or input meshes).
 
@@ -30,6 +18,17 @@ Examples:
     python get_metrics.py -i /path/to/results --before -o metrics_before.csv
     python get_metrics.py -i /path/to/<mesh_id> -o /path/to/<mesh_id>/metrics.csv
 """
+import argparse
+import os
+import random
+import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+import igl
+import meshio
+import numpy as np
+import pandas as pd
 
 
 def load_triangles(mesh_path):

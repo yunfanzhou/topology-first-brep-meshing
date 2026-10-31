@@ -14,7 +14,7 @@ from operations.stitch import split_between_two_stitching_vertices, stitch_halfe
 import igl
 from utils.dijkstra import dijkstra_shortest_path_between_loops
 import numpy as np
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 
 MAX_TRACE_FACTOR = 100 # if the traced distance is 100x that of the L2 distance of the feature edge, we terminate the tracing and refine the base mesh
 
@@ -82,9 +82,7 @@ def detect_boundary_hug_after_halfedge(V,
                                        connectivity,
                                        patch_regular_space_data,
                                        feature_id_to_polyline_V,
-                                       traced_id_set,
-                                       loop_topology_data,
-                                       initial_loop_tracing_data):
+                                       traced_id_set):
     # Two flavors of boundary-hug, both detected here:
     #   (a) After the trace, no component contains all traced edges — the
     #       just-finished halfedge scattered traces across components.
@@ -96,10 +94,8 @@ def detect_boundary_hug_after_halfedge(V,
     # just fall through and let after_trace_initial_loop pick the right
     # component. Also guards against empty-curve KDTree queries in case (b).
     # Degenerate feature edges (a singular apex) have an empty polyline and are
-    # never traced. Once every other feature edge is traced they must be
-    # anchored at the end of a traced feature (check_degenerate_apex_features).
+    # never traced, so they don't count as remaining.
     if not any(fid not in traced_id_set and len(P) > 0 for fid, P in feature_id_to_polyline_V.items()):
-        check_degenerate_apex_features(loop_topology_data, initial_loop_tracing_data)
         return False
     F_np = np.array(connectivity.F)
     cc = traced_edge_separated_components(F_np,
@@ -185,7 +181,7 @@ def trace_one_feature_edge(V,
     '''
     The curve_poly_V is a vector of vertices. The vertex positions are ordered in the same orientation as the halfedge in the loop.
     The closest_fids_matrix is a precomputed matrix with each row the closest face ids for each vertex in curve_poly_V. 
-    The closest_fids_matrix is only passed in when we are trying the initial shortcut tracing. 
+    The closest_fids_matrix is passed in by the initial shortcut tracing (and by the non-initial loop retry after a component split). 
     Because, we need to avoid closest faces in different components. 
     But in rollback tracing, the loop will never be closed before the last vertex. So we don't need to worry about it.
     '''
@@ -287,9 +283,6 @@ def trace_one_feature_edge(V,
         elif cummulated_traced_distance > MAX_TRACE_FACTOR * cummulated_l2_distance and not ignore_trace_geometry:
             print_if_verbose(f"Tracing terminated early for feature edge due to excessive traced distance of factor {MAX_TRACE_FACTOR}. "
                              f"Cummulated traced distance: {cummulated_traced_distance}, Cummulated L2 distance: {cummulated_l2_distance}")
-            plot_mesh_with_trace(V, connectivity.F, 
-                                 edge_set = patch_regular_space_data.traced_edge_set,
-                                 points_list=[curve_poly_V])
             raise ValueError("Tracing terminated early due to excessive traced distance.")
         #update tracing loop data
         update_edge_tracing_data(traced_path, edge_tracing_return_data)
@@ -310,6 +303,8 @@ def trace_initial_loop_new(V,
                        initial_loop_tracing_data,
                        ignore_trace_geometry,
                        is_last_attempt=False):
+    # Returns whether trace_initial_loop_fallback ran (summary["initial_loop_fallback"]).
+    initial_fallback_used = False
     # add singularity corners
     if initial_loop_tracing_data.singularity_corner_mapping:
         for corner_vid in initial_loop_tracing_data.singularity_corner_mapping.values():
@@ -346,20 +341,19 @@ def trace_initial_loop_new(V,
         # 2. If the singularity corners are in the mesh, we need to add the vid to prohibited set
         for corner_id, apex_vid in initial_loop_tracing_data.singularity_corner_mapping.items():
             patch_regular_space_data.prohibited_vids_set.add(apex_vid)
-        # # 3. Add the seam merged edges (if exists) to the frozen edge set
-        # for edge in surface_merged_edges:
-        #     patch_regular_space_data.frozen_edges_set.add(edge)
-        #     patch_regular_space_data.prohibited_vids_set.add(edge[0])
-        #     patch_regular_space_data.prohibited_vids_set.add(edge[1])
         # try heuristic again but with borders prohibited
-        second_heuristic_failed = trace_initial_loop_with_heuristics(V,  
-                                                                    connectivity,
-                                                                    patch_regular_space_data,
-                                                                    loop_topology_data,
-                                                                    loop_geometry_data,
-                                                                    initial_loop_tracing_data,
-                                                                    off_boundary=True,
-                                                                    ignore_trace_geometry=ignore_trace_geometry)
+        try:
+            second_heuristic_failed = trace_initial_loop_with_heuristics(V,
+                                                                        connectivity,
+                                                                        patch_regular_space_data,
+                                                                        loop_topology_data,
+                                                                        loop_geometry_data,
+                                                                        initial_loop_tracing_data,
+                                                                        off_boundary=True,
+                                                                        ignore_trace_geometry=ignore_trace_geometry)
+        except ValueError as e:
+            print_if_verbose(f"Initial loop tracing raised error in second heuristic: {e}")
+            second_heuristic_failed = True
         if second_heuristic_failed:
             print_if_verbose("Initial loop tracing failed again in second heuristic, revert to fall back tracing.")
             # if the result violate the topology we need to do the fall back trace of the initial loop)
@@ -392,6 +386,7 @@ def trace_initial_loop_new(V,
                                     initial_loop_tracing_data,
                                     ignore_trace_geometry,
                                     is_last_attempt=is_last_attempt)
+            initial_fallback_used = True
     
     # After all tracing have finished now add the degenerate feature edge vids to the mapping
     # only degenerate feature edges have one vid. Others have at least 2 vids
@@ -415,6 +410,7 @@ def trace_initial_loop_new(V,
     # update regular space data after one loop after tracing
     update_regular_space_data_after_one_loop(connectivity, 
                                              patch_regular_space_data)
+    return initial_fallback_used
 
 
 def trace_initial_loop_with_heuristics(V,
@@ -458,11 +454,6 @@ def trace_initial_loop_with_heuristics(V,
                                                 cc)
             if not c:
                 print_if_verbose("components contain all traced edges failed. Inital loop trace fallback")
-                # plotting the edge that's not in the compoennt
-                # for c in cc:
-                #     F_subset = F_np[c]
-                #     missing_edges = patch_regular_space_data.traced_edge_set - set([create_edge(edge[0], edge[1]) for edge in igl.edges(F_subset)])
-                #     plot_mesh_with_trace(V, F_subset, edge_set=missing_edges)
                 break
             elif len(c) == 1:
                 # Update the connectivity with the component that contains all the traced edge
@@ -531,9 +522,7 @@ def trace_initial_loop_with_heuristics(V,
                                                        connectivity,
                                                        patch_regular_space_data,
                                                        loop_geometry_data.feature_id_poly_V_True_orientation,
-                                                       initial_loop_tracing_data.loop_tracing_data.traced_id_set,
-                                                       loop_topology_data,
-                                                       initial_loop_tracing_data)):
+                                                       initial_loop_tracing_data.loop_tracing_data.traced_id_set)):
             print_if_verbose(f"    Halfedge {halfedge.feature_id} appears to hug boundary; reverting and retrying with boundary prohibited.")
             snapshot = { 
                 "V_len": pre_trace_V_len,
@@ -548,6 +537,10 @@ def trace_initial_loop_with_heuristics(V,
                                       initial_loop_tracing_data.loop_tracing_data,
                                       halfedge,
                                       snapshot)
+            # the revert releases a singular apex that no other traced edge touches;
+            # keep it non-traceable so the retry cannot pass through it
+            for apex_vid in initial_loop_tracing_data.singularity_corner_mapping.values():
+                patch_regular_space_data.prohibited_vids_set.add(apex_vid)
             added_vids, added_edges = temporarily_prohibit_boundary(connectivity,
                                                                     patch_regular_space_data)
             try:
@@ -577,9 +570,15 @@ def trace_initial_loop_with_heuristics(V,
                                              added_vids,
                                              added_edges)
 
+    # Once every feature edge with a polyline is traced, the degenerate (singular
+    # apex) features must be anchored at the end of a traced feature. Checked here
+    # rather than in the boundary-hug check, which is skipped when the boundary is
+    # prohibited (the second heuristic, patch meshes without a boundary).
+    if not any(fid not in initial_loop_tracing_data.loop_tracing_data.traced_id_set and len(P) > 0
+               for fid, P in loop_geometry_data.feature_id_poly_V_True_orientation.items()):
+        check_degenerate_apex_features(loop_topology_data, initial_loop_tracing_data)
+
     # check the topology after the initial loop tracing
-    # plot_mesh_with_trace(V, connectivity.F, 
-    #                      edge_set = patch_regular_space_data.traced_edge_set)
     if not initial_trace_failed and not after_trace_initial_loop(connectivity,
                                                                  loop_topology_data,
                                                                  initial_loop_tracing_data.loop_tracing_data,
@@ -634,9 +633,6 @@ def trace_initial_loop_fallback(V,
                                               cc)
             if not c:
                 print_if_verbose(" Rollback trace: Traced edges not all in component")
-                plot_mesh_with_trace(V,
-                                     connectivity.F,
-                                     edge_set=patch_regular_space_data.traced_edge_set)
                 raise ValueError("Traced edges do not form a valid component in initial loop fallback.")
             elif len(c) == 1:
                 # Update the connectivity with the component that contains all the traced edge
@@ -709,8 +705,7 @@ def trace_initial_loop_fallback(V,
         traced_halfedge_idx += 1
     # get the component that is fully boundaried by trace
     if not after_trace_initial_loop_fallback(connectivity,
-                                       patch_regular_space_data,
-                                       V):
+                                       patch_regular_space_data):
         print_if_verbose("After trace initial loop fallback topology check failed.")
         raise ValueError("Error: The initial loop fallback tracing failed.")
 
@@ -790,8 +785,6 @@ def trace_initial_loop_fallback(V,
                                                  vid1,
                                                  patch_regular_space_data.prohibited_vids_set)    
 
-    # print_if_verbose("edge manifold check after split before stitch:", igl.is_edge_manifold(np.array(connectivity.F)))
-
 
     # 3. stitch the halfedges together. Note we don't stitch the two end points 
     for feature_id, (true_halfedge_index, false_halfedge_index) in aligning_halfedge_pairs.items():
@@ -805,21 +798,18 @@ def trace_initial_loop_fallback(V,
                                                              connectivity,
                                                              halfedge_tracing_data0.traced_vids,
                                                              trace1)
-        # --- area debug ---
+        # zero-area faces after the stitch fail this attempt (tolerated on the last attempt)
         _da = igl.doublearea(np.array(V), np.array(connectivity.F))
         _zero = np.where(_da == 0)[0]
         if len(_zero) > 0:
-            print(f"[stitch_halfedges_same_patch] ZERO-AREA introduced for feature_id={feature_id}: {len(_zero)} faces {_zero.tolist()}")
+            print_if_verbose(f"[stitch_halfedges_same_patch] ZERO-AREA introduced for feature_id={feature_id}: {len(_zero)} faces {_zero.tolist()}")
             if not is_last_attempt:
-                plot_mesh_with_trace(V, connectivity.F, edge_set=patch_regular_space_data.traced_edge_set)
                 raise ValueError(f"ZERO-AREA faces after stitch_halfedges_same_patch feature_id={feature_id}")
-        # --- end area debug ---
         # update the halfedge tracing data to the stitched one
         # but onte we still need to update the corner later after the halfcorner stitching
         initial_loop_tracing_data.loop_tracing_data.feature_id_to_edge_tracing_data[feature_id] = trace_true_orientation
         initial_loop_tracing_data.loop_tracing_data.feature_id_to_edge_orientation[feature_id] = True
 
-    # print_if_verbose("edge manifold check after stitching:", igl.is_edge_manifold(np.array(connectivity.F)))
     # 4. stitch the halfcorners (we might have one halfcorner corresponding to more than two halfedges)
     # get the corner to vids mapping
     corner_id_to_halfcorner_vids = dict[int, list[int]]()
@@ -843,20 +833,18 @@ def trace_initial_loop_fallback(V,
             stitched_to_vid = stitch_halfcorners_same_patch(V,
                                                             connectivity,
                                                             halfcorner_vids)
-            # --- area debug ---
+            # zero-area faces after the stitch fail this attempt (tolerated on the last attempt)
             _da = igl.doublearea(np.array(V), np.array(connectivity.F))
             _zero = np.where(_da < 1e-16)[0]
             if len(_zero) > 0:
-                print(f"[stitch_halfcorners_same_patch] ZERO-AREA introduced for corner_id={corner_id} halfcorner_vids={halfcorner_vids}: {len(_zero)} faces {_zero.tolist()}")
+                print_if_verbose(f"[stitch_halfcorners_same_patch] ZERO-AREA introduced for corner_id={corner_id} halfcorner_vids={halfcorner_vids}: {len(_zero)} faces {_zero.tolist()}")
                 if not is_last_attempt:
                     raise ValueError(f"ZERO-AREA faces after stitch_halfcorners_same_patch corner_id={corner_id}")
-            # --- end area debug ---
         # also update the loop tracing data corner id to vid mapping
             initial_loop_tracing_data.loop_tracing_data.corner_id_to_vid[corner_id] = stitched_to_vid
         else:
             initial_loop_tracing_data.loop_tracing_data.corner_id_to_vid[corner_id] = halfcorner_vids[0]
     adopt_stitched_apex(initial_loop_tracing_data, apex_vids)
-    # print_if_verbose("edge manifold check after stitching halfcorners:", igl.is_edge_manifold(np.array(connectivity.F)))  
     # 5. update the loop tracing data and regular_space_data
     revert_regular_space_data(patch_regular_space_data) # we revert regular_space_data first. 
     # Can then update the loop tracing edge data one by one while updating the tracing data 
@@ -916,10 +904,6 @@ def trace_non_initial_loop(V,
     non_initaial_loop_fallback = False
     after_trace_non_initial_loop_success = True
     previous_loops_need_treatment = []
-    # # Count total number of non-degenerate halfedges
-    # degenerate_count = sum(1 for h in loop_topology_data.halfedges if h.is_degenerate)
-    # if degenerate_count > 0:
-    #     raise ValueError(f"non initial loop contains degenerate edges")
 
     # store the initial state before the loop begins
     before_tracing_V_len = len(V)
@@ -932,8 +916,8 @@ def trace_non_initial_loop(V,
         if halfedge.start_corner_id != prev_halfedge.end_corner_id:
             raise Exception(f"Non initial loop is not a simple loop. Previous halfedge end corner {prev_halfedge.end_corner_id} does not match current halfedge start corner {halfedge.start_corner_id}.")
         if halfedge.feature_id in loop_tracing_data.traced_id_set:
-            # note 12/19/2025 this is possible when then interior loop shares some edge with itself, or other loops
-            # just need to be merged. But we skip this implementation for now, cause it's not found in the dataset
+            # this is possible when the interior loop shares some edge with itself, or with other loops;
+            # they would just need to be merged. Not implemented, since it does not occur in the dataset
             raise Exception(f"Non initial loop contains seam edge {halfedge.feature_id}")
         visited_corner_ids.add(halfedge.start_corner_id)
 
@@ -984,9 +968,6 @@ def trace_non_initial_loop(V,
                                                         cc)
                     if not c:
                         print_if_verbose("components contain all traced edges failed doesn't exist")
-                        plot_mesh_with_trace(V,
-                                             connectivity.F,
-                                             edge_set=patch_regular_space_data.traced_edge_set)
                         raise ValueError("Traced edges do not form a valid component in non-initial loop tracing. There is no valid path found")
                     elif len(c) == 1:
                         # Update the connectivity with the component that contains all the traced edge
@@ -1124,14 +1105,17 @@ def trace_non_initial_loop_fallback(V,
         print_if_verbose(f"     Tracing non-initial loop using fall back method with previous loops: {patch_non_initial_loop_treatment_data.loops_need_treatment}")
         previous_loops_to_treat = []
         still_need_to_treat_ids = []
-        if len(patch_non_initial_loop_treatment_data.loops_need_treatment) == 0:
-            patch_non_initial_loop_treatment_data.loops_need_treatment = list(range(1, len(patch_regular_space_data.previous_loops)))  # skip the initial loop at index 0
         for i in patch_non_initial_loop_treatment_data.loops_need_treatment:
             if i in patch_non_initial_loop_treatment_data.already_treated_non_initial_loops:
                 continue
             still_need_to_treat_ids.append(i)
             previous_loops_to_treat.append(patch_regular_space_data.previous_loops[i])
         print_if_verbose(f"      still need to treat loops {still_need_to_treat_ids} ")
+        if not still_need_to_treat_ids:
+            # every trapped loop is already connected to the boundary: nothing changes
+            # before the retrace, which would fail the same way forever
+            raise ValueError(f"Error: Non initial loop fallback tracing made no progress: trapped loops "
+                             f"{patch_non_initial_loop_treatment_data.loops_need_treatment} are already treated.")
 
 
         for i, previous_loop in enumerate(previous_loops_to_treat):
@@ -1193,6 +1177,8 @@ def trace_non_initial_loop_fallback(V,
         previous_loop_to_treat = []
         visited_corner_ids = set()
         for i, halfedge in enumerate(loop_topology_data.halfedges):
+            if halfedge.is_degenerate:
+                continue
             if halfedge.feature_id in loop_tracing_data.traced_id_set:
                 print_if_verbose(f"    Non initial loop fallback tracing: contain seam edges {halfedge.feature_id}")
                 raise Exception(f"Non initial loop contains seam edge {halfedge.feature_id}")
@@ -1255,7 +1241,7 @@ def trace_non_initial_loop_fallback(V,
             loop_tracing_data.traced_id_set.clear()
 
     if not after_trace_non_initial_loop_success:
-        print_if_verbose("Error: Non initial loop fallback tracing failed. With loops needing treatment: ", previous_loop_to_treat)
+        print_if_verbose(f"Error: Non initial loop fallback tracing failed. With loops needing treatment: {previous_loop_to_treat}")
         raise ValueError("Error: Non initial loop fallback tracing failed.")
     return
 
@@ -1360,13 +1346,6 @@ def trace_all_loops_one_patch(connectivity,
                               summary= None,
                               ignore_trace_geometry=False,
                               is_last_attempt=False):
-    # edge_V = []
-    # for loop_id, loop_geom_data in patch_input_data.patch_loop_geometry_data.items():
-    #     for feature_id, poly_V in loop_geom_data .feature_id_poly_V_True_orientation.items():
-    #         edge_V.extend(poly_V)
-            
-    # plot_mesh_with_trace(patch_input_data.V, connectivity.F,
-    #                      points_list=edge_V)  
     print_if_verbose(" Tracing initial loop...")
     # trace initial loop.
     mainfold = igl.is_edge_manifold(np.array(connectivity.F))
@@ -1428,10 +1407,10 @@ def trace_all_loops_one_patch(connectivity,
             restore_regular_space_data(regular_space_data, before_non_initial_rsd)
             patch_tracing_data.remaining_loops_tracing_data.clear()
             disable_corner_reuse = True
-    # consolidate V,F and map the traced loops to after consolidation configurations
     summary["non_initial_loop_fallback_cnt"] = non_initial_loop_fallback_cnt
     summary["non_initial_corner_reuse_disabled"] = disable_corner_reuse
-    # ToDo: placeholder code. Needs to be updated to the consolidated V, F
+    # Return the traced (unconsolidated) mesh; V is patch_input_data.V, modified in place.
+    # The caller consolidates it later, before the linear solve.
     V = patch_input_data.V
     F = connectivity.F
     return V, F
@@ -1441,8 +1420,9 @@ def after_trace_initial_loop(connectivity,
                              loop_tracing_data,
                              patch_regular_space_data,
                              V = None):
-    ''' The function returns True and connectivity data updated if conditions listed below are met.
-    Otherwise, returns false. 
+    ''' The function returns True and connectivity data updated if exactly one component meets
+    conditions 2-4 (see operations/extract.py), or if exactly one annulus that meets 2 and 4 can be
+    repaired by stitching its untraced holes. Otherwise, returns False.
     '''
     disk_component = None
     # 1. Find all the connected components
@@ -1453,8 +1433,7 @@ def after_trace_initial_loop(connectivity,
                                                 loop_topology_data,
                                                 loop_tracing_data,
                                                 patch_regular_space_data.traced_edge_set,
-                                                cc,
-                                                V)
+                                                cc)
 
     if len(disk_component) == 1:
         # update the connectivity if we find the disk after tracing initial loop
@@ -1472,8 +1451,7 @@ def after_trace_initial_loop(connectivity,
                                             loop_topology_data,
                                             loop_tracing_data,
                                             patch_regular_space_data.traced_edge_set,
-                                            cc,
-                                            V)
+                                            cc)
     if len(stitchable) != 1:
         print_if_verbose(f"After tracing initial loop, the mesh is separated into {len(cc)} components, "
                          f"but {len(disk_component)} clean disks and {len(stitchable)} stitchable annuli were found.")
@@ -1502,8 +1480,7 @@ def rebuild_connectivity_after_stitch(connectivity, V):
     connectivity.modified_edge_set = set()
 
 def after_trace_initial_loop_fallback(connectivity,
-                                      patch_regular_space_data,
-                                      V):
+                                      patch_regular_space_data):
     '''
     This function extract the component that is entirely bounded by only the traced loop
     '''
@@ -1514,8 +1491,10 @@ def after_trace_initial_loop_fallback(connectivity,
 
     disk_component = components_fullfill_2_3(F_np,
                                               patch_regular_space_data.traced_edge_set,
-                                              cc,
-                                              V)
+                                              cc)
+    if len(disk_component) == 0:
+        print_if_verbose("After tracing initial loop fallback, no component is bounded by traced edges only.")
+        return False
     # If there's more than one component that fulfills the conditions, we want the one the does not contain the untraceable edges/vertices
     if len(disk_component) > 1:
         frozen_vids_set = set[int]()
@@ -1542,7 +1521,7 @@ def after_trace_initial_loop_fallback(connectivity,
 def prune_after_subloop_closure(V,
                                 connectivity,
                                 patch_regular_space_data):
-    # Mirror of after_trace_non_initial_loops applied mid-loop.
+    # Component check applied mid-loop.
     # When a halfedge ends at a corner that has already been visited in this
     # loop's traversal, a sub-loop has just closed and split the disk into 2
     # components. Keep the one with all traced edges; the other is the
@@ -1596,16 +1575,6 @@ def find_previous_loops_in_component(patch_regular_space_data,
                 previous_loops_ids.append(i)
     return previous_loops_ids
 
-# def after_trace_pinching_path(connectivity,
-#                               traced_edge_set,
-#                               remaining_corner_to_vids_set):
-#     # after tracing pinching path, we want to make sure that no vids that need to be pinched later are separated into different components
-#     cc = traced_edge_separated_components(connectivity.F, traced_edge_set)
-#     if len(cc) <= 1:
-#         return True
-#     F_np = np.array(connectivity.F)
-#     for corner_id, vids in remaining_corner_to_vids_set.items():
-
 
 def restore_connectivity(V,
                          connectivity,
@@ -1619,21 +1588,6 @@ def restore_connectivity(V,
     connectivity.adj_list = new_adj_list
     # restore edge length mapping
     connectivity.edge_set_to_length_mapping = edge_length_mapping(V, connectivity.F)
-    # restore_adj_list(V, 
-    #                 connectivity.adj_list, 
-    #                 connectivity.adj_list_copy_dict)
-    # # verfify adj_list just for debugging
-    # for vid, neighbors in enumerate(connectivity.adj_list):
-    #     if set(neighbors) != set(new_adj_list[vid]):
-    #         print_if_verbose(f"New connectivity adj_list at vid {vid}: {new_adj_list[vid]}")
-    #         print_if_verbose(f"Restored connectivity adj_list at vid {vid}: {connectivity.adj_list[vid]}")
-    #         plot_mesh_with_trace(V, connectivity.F,
-    #                              vector_of_vids=[vid] + list(new_adj_list[vid]))
-    #         raise Exception(f"Adjacency list is incorrect after restoring connectivity at vid {vid}.")
-    
-    # restore_edge_mapping(V,
-    #                     connectivity.edge_set_to_length_mapping,
-    #                     connectivity.modified_edge_set)
     connectivity.VF = compute_VF(connectivity.F)
 def update_edge_tracing_data(traced_path,
                              edge_tracing_data): 

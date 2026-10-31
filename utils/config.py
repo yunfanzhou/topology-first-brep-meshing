@@ -1,7 +1,6 @@
 # config.py
 
 verbose = 0
-thread_count = 1
 
 # --- Oversized-patch guard ---------------------------------------------------
 # When a patch's vertex count crosses ``oversized_vertex_threshold`` during the
@@ -9,6 +8,8 @@ thread_count = 1
 # can be investigated before an OOM kill.  See
 # ``utils.print.dump_oversized_patch_state``.
 oversized_vertex_threshold = 1_000_000
+# Relative to the working directory by default; main.py points it at
+# <output_folder>/oversized_patch_dumps (in worker processes too).
 oversized_dump_dir = "oversized_patch_dumps"
 # Set by ``local_step_one_patch`` so the dump is labelled with the patch id.
 current_patch_id = None
@@ -26,3 +27,7 @@ current_patch_id = None
 collapsed_iso_line_rel_tol = 1e-7
 # Bound on the manifold retry loop in run_initial_meshing_for_face.
 manifold_refine_max = 4
+
+# Seconds one mmg run may take before mmg_remesh kills it (its helper process, or the mmg2d
+# executable) and raises RuntimeError.
+mmg_timeout_seconds = 3600

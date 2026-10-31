@@ -1,0 +1,137 @@
+name: CI
+
+# every branch, so forks get CI on their branches before opening a pull request
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  pipeline:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # a cold build of the wildmeshing package takes most of this; later runs take its wheel from the pip cache
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # the wildmeshing package (remeshing stage) links GMP; on Windows its build downloads it
+      - name: Install GMP
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install -y libgmp-dev
+          else
+            brew list gmp > /dev/null 2>&1 || brew install gmp
+          fi
+
+      - name: Prepare the build of the wildmeshing package
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # its dependencies nest deep enough to hit MAX_PATH under the default temp directory
+            git config --global core.longpaths true
+            mkdir -p /d/t && echo "TMP=D:\\t" >> "$GITHUB_ENV" && echo "TEMP=D:\\t" >> "$GITHUB_ENV"
+          fi
+          # about 2.5 GB per compile job; the macOS runners have 7 GB
+          if [ "$RUNNER_OS" = macOS ]; then echo "CMAKE_BUILD_PARALLEL_LEVEL=2" >> "$GITHUB_ENV"; fi
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Unit tests
+        run: python -m pytest tests -v
+
+      - name: Mesh data/simple
+        run: |
+          failed=()
+          for f in data/simple/*.hdf5; do
+            m=$(basename "$f" .hdf5)
+            echo "::group::$m"
+            ok=1
+            python main.py "$f" "out/$m" --error_rel 0.05 || ok=0
+            if [ $ok = 1 ]; then
+              python remeshing/remesh.py "out/$m" --len_rel 0.05 || ok=0
+            fi
+            if [ $ok = 1 ]; then
+              python check_topology.py "$f" "out/$m" || ok=0
+            fi
+            echo "::endgroup::"
+            if [ $ok = 0 ]; then
+              echo "::error::$m failed"
+              failed+=("$m")
+            fi
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "Failed models: ${failed[*]}"
+            exit 1
+          fi
+
+      # main.py ran Mmg in memory (mmgpy) above; with its executable the meshes must be the same, bit for bit
+      - name: Mmg in memory and as an executable agree
+        run: |
+          for f in data/simple/*.hdf5; do
+            m=$(basename "$f" .hdf5)
+            echo "::group::$m"
+            python main.py "$f" "out_binary/$m" --error_rel 0.05 --mmg binary
+            echo "::endgroup::"
+          done
+          python -c "
+          import os, pickle
+          import numpy as np
+          differ = []
+          for m in sorted(os.listdir('out_binary')):
+              a, b = (pickle.load(open(os.path.join(r, m, 'fused.pkl'), 'rb')) for r in ('out', 'out_binary'))
+              same = all(np.array_equal(x, y) for x, y in zip(a[:2], b[:2])) and a[2:] == b[2:]
+              print(m, 'identical' if same else 'DIFFERENT')
+              differ += [] if same else [m]
+          assert len(os.listdir('out_binary')) == 15 and not differ, f'the Mmg routes differ on {differ}'
+          "
+
+      - name: Evaluation scripts
+        run: |
+          python get_distance.py -i out --cad-root data/simple -o out/distance.csv
+          python get_metrics.py -i out -o out/metrics.csv
+          python parse_results.py out --csv out/timing.csv
+          python plot_metrics.py -i out/metrics.csv out/distance.csv -o out/plots --format html
+          python -c "
+          import pandas as pd
+          d = pd.read_csv('out/distance.csv')
+          print(d.to_string(index=False))
+          assert len(d) == 15 and d.hausdorff.notna().all(), 'missing distances'
+          "
+
+      - name: Upload outputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: out-${{ matrix.os }}
+          path: |
+            out/
+            !out/**/checkpoints/
+            out_binary/
+            !out_binary/**/checkpoints/
+          retention-days: 7

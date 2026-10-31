@@ -6,6 +6,7 @@ These structures provide a type-safe and organized way to handle mesh data, feat
 """
 import numpy as np
 from collections import defaultdict
+from utils.print import print_if_verbose
 
 class ConnectivityMaintainance:
     def __init__(self, 
@@ -47,7 +48,7 @@ class SingularityData:
         if position is not None and position.ndim == 1 and position.size == 3:
             self.position = position
         else:
-            print(f"Warning: Invalid position: {position}")
+            print_if_verbose(f"Warning: Invalid position: {position}")
             self.position = None
     def __repr__(self):
         return f"SingularityData(singularity_vids={self.singularity_vids}, position={self.position})"
@@ -104,8 +105,8 @@ class PatchInputData:
                  u_periodic_edges: tuple[list[int], list[int]] = None,
                  v_periodic_edges: tuple[list[int], list[int]] = None,
                  surface_merged_edges: list[(int, int)] = None):
-        self.V = V or []
-        self.F = F or []
+        self.V = V if V is not None else []
+        self.F = F if F is not None else []
         self.initial_loop_id = initial_loop_id
         self.patch_loop_geometry_data = patch_loop_geometry_data or {}
         self.patch_loop_topology_data = patch_loop_topology_data or {}
@@ -129,8 +130,8 @@ class EdgeTracingData:
                  end_vid: int = None):
         self.traced_vids = traced_vids or []
         self.segment_upsample_size = segment_upsample_size or []
-        self.start_vid = start_vid or None
-        self.end_vid = end_vid or None
+        self.start_vid = start_vid
+        self.end_vid = end_vid
     def __repr__(self):
         return (f"EdgeTracingData(traced_vids={self.traced_vids}, "
                 f"segment_upsample_size={self.segment_upsample_size}, "
@@ -163,7 +164,7 @@ class InitialLoopTracingData:
         The only difference is that it will be preserved upon rollback, while corner_id_to_vid will be reset. 
         So we treat singularity corners differently from regular corners.
         '''    
-        self.initial_loop_id = initial_loop_id or None
+        self.initial_loop_id = initial_loop_id
         self.loop_tracing_data = loop_tracing_data or LoopTracingData()
         self.singularity_corner_mapping = singularity_corner_mapping or {} # corner id to apex vid
     def __repr__(self):

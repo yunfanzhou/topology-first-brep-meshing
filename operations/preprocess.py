@@ -1,5 +1,3 @@
-from utils.print import plot_mesh_with_trace, print_if_verbose
-
 def find_degenerate_corners(patch_input_data):
     degenerate_edge_id_set = set()
     patch_degenerate_corner_id_set = set()
