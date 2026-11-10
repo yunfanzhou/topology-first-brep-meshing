@@ -84,19 +84,13 @@ plus `result.json` (per-face status and timings). The remeshing stage adds:
 
 - `get_distance.py`: Hausdorff distance from points sampled on the CAD model to `remeshed.vtu`
 - `get_metrics.py`: per-triangle quality (minimum angle, radius ratio)
-- `plot_metrics.py`: histograms of the CSVs those two write
-- `parse_results.py`: success and timing summary of a batch of `result.json` files
 
 For example, on the outputs of all models in `data/simple` (each in `out/<model>`):
 
 ```
 python get_distance.py -i out --cad-root data/simple -o out/distance.csv
 python get_metrics.py -i out -o out/metrics.csv
-python plot_metrics.py -i out/metrics.csv out/distance.csv -o out/plots --format html
-python parse_results.py out
 ```
-
-`plot_metrics.py` writes PNG by default, which needs `pip install kaleido`; `--format html` does not.
 
 ## Tests
 

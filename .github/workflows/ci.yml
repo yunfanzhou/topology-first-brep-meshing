@@ -115,8 +115,6 @@ jobs:
         run: |
           python get_distance.py -i out --cad-root data/simple -o out/distance.csv
           python get_metrics.py -i out -o out/metrics.csv
-          python parse_results.py out --csv out/timing.csv
-          python plot_metrics.py -i out/metrics.csv out/distance.csv -o out/plots --format html
           python -c "
           import pandas as pd
           d = pd.read_csv('out/distance.csv')

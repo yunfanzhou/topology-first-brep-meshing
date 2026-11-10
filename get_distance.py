@@ -11,7 +11,7 @@ You hand it the directory layout directly:
 Only the first CAD part (part_id = 0) is meshed in this pipeline, so the point
 cloud is always sampled from part 0.
 
-Writes a CSV: mesh_id, hausdorff. Use plot_metrics.py for plotting.
+Writes a CSV: mesh_id, hausdorff.
 hausdorff = max distance from CAD point-cloud samples (random in each face's
 parameter domain, inside its trimming loops) to (V, F) of remeshed.vtu,
 normalized by the CAD bbox diagonal. Distance is computed with

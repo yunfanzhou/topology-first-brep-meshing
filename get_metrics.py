@@ -8,7 +8,6 @@ Layout expected:
 Writes a CSV with one row per triangle: mesh_id, min_angle, radius_ratio.
 Also writes a sibling <stem>_counts.csv with one row per mesh:
     mesh_id, num_vertices, num_faces
-Use plot_metrics.py to plot histograms from either CSV.
 
 Single-folder mode is auto-detected when -i contains the target mesh
 (remeshed.vtu, or mesh.msh with --before) directly.
