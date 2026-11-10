@@ -24,14 +24,14 @@ def fan_patch(xs, apex):
 
 @pytest.mark.parametrize("scale", [0.1, 100.0])
 def test_align_snaps_by_normalized_parameter_at_any_scale(scale):
-    # Interior vertices at normalized parameters 0.2, 0.6 (patch A) and 0.4, 0.605 (patch B):
-    # only 0.6 and 0.605 are within 1% of the segment, at any model scale.
+    # Interior vertices at normalized parameters 0.2, 0.6 (patch A) and 0.28, 0.75 (patch B):
+    # only 0.2 and 0.28 are within 10% of the segment (0.6 and 0.75 are not), at any model scale.
     VA, cA = fan_patch([0.0, 0.2 * scale, 0.6 * scale, scale], [0.5 * scale, scale, 0.0])
-    VB, cB = fan_patch([0.0, 0.4 * scale, 0.605 * scale, scale], [0.5 * scale, -scale, 0.0])
+    VB, cB = fan_patch([0.0, 0.28 * scale, 0.75 * scale, scale], [0.5 * scale, -scale, 0.0])
     Vs = [VA, VB]
     segments = [[0, 1, 2, 3], [0, 1, 2, 3]]
     aligned = align_one_segment_of_patches(Vs, [cA, cB], segments)
-    expected = [0.0, 0.2, 0.4, 0.6025, 1.0]
+    expected = [0.0, 0.24, 0.6, 0.75, 1.0]
     for V, conn, vids in zip(Vs, [cA, cB], aligned):
         chain = vids + [3]  # the returned chain leaves out the segment's last vertex
         assert all(b in conn.adj_list[a] for a, b in zip(chain, chain[1:]))

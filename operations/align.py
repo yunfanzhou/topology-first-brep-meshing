@@ -143,7 +143,11 @@ def align_one_segment_of_patches(Vs,
     Input:
         segments: list of list of vids corresponding to same edge segment embedded on different patches.
     '''
-    ALIGN_SNAP_TOL_REL = 1e-2  # tolerance in normalized [0,1] parameter space for snapping cross-segment vertices
+    # Tolerance in normalized [0, 1] parameter space for merging vertices of different copies of the
+    # segment. 0.1: a copy usually has 0-3 interior vertices, so this merges the near pairs that would
+    # otherwise be injected into the other patch as short edges; a merge moves a vertex by at most 5%
+    # of the segment.
+    ALIGN_SNAP_TOL_REL = 0.1
     # get cumulated lengths for all segments
     norm_param_list = []
     for i in range(len(segments)):
