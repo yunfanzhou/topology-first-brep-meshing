@@ -1149,7 +1149,8 @@ def _run_initial_meshing_for_face(
         V_3d_arr = fix_nonmanifold_after_stitch(V_uv, F_uv, F_3d_list, face.surface)
         V_3d_list = V_3d_arr.tolist()
         if not igl.is_edge_manifold(np.array(F_3d_list)):
-            print_if_verbose("Non-manifold edges remain after initial remesh. ")
+            # the face id keeps the message distinct, so the warning shows for every face
+            warnings.warn(f"face {face.id}: non-manifold edges remain after initial remesh")
         with alarm_timeout(EMBED_TIMEOUT_SECONDS):
             V_mmg, F_mmg, tagged_edges = embed_loops_one_patch(V_uv,
                                                 V_3d_list,
@@ -1217,7 +1218,7 @@ def _run_initial_meshing_for_face(
             F_3d = connectivity.F
 
         if not igl.is_edge_manifold(np.array(F_3d)):
-            print_if_verbose("Non-manifold edges remain after embedding and stitching. ")
+            warnings.warn(f"face {face.id}: non-manifold edges remain after embedding and stitching")
         surface_merged_edges = build_surface_merged_edges_with_apex(
             merged_u_sub_chains, merged_v_sub_chains, face, sing_info)
         return V_3d_list, F_3d, merged_u_vertices, merged_v_vertices, sing_info, surface_merged_edges, V_uv_fallback, F_fallback, fallback_sub_domains
