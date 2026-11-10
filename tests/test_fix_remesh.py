@@ -167,12 +167,12 @@ def test_feature_pass_without_spacing_raises(monkeypatch):
 
 @pytest.mark.parametrize("route", ["_mmg_in_helper", "_mmg_executable"])
 def test_mmg_remesh_rejects_empty_result(monkeypatch, route):
-    """mmg succeeding with no triangles is an explicit ValueError in
-    mmg_remesh, for every caller and either route."""
+    """mmg succeeding with no triangles is an explicit RuntimeError in
+    mmg_remesh, like its other failures, for every caller and either route."""
     empty = (np.zeros((1, 2)), np.zeros((0, 3), dtype=int),
              np.zeros((0, 2), dtype=int), np.zeros(0, dtype=int))
     monkeypatch.setattr(rb, route, lambda *a, **k: empty)
     ones = np.ones(len(SQ_V))
-    with pytest.raises(ValueError, match="no triangles"):
+    with pytest.raises(RuntimeError, match="no triangles"):
         mmg_remesh(SQ_V, SQ_F, EE=ones, FF_m=0 * ones, GG=ones,
                    mmg2d_path=None if route == "_mmg_in_helper" else "mmg2d_O3")

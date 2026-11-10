@@ -567,7 +567,8 @@ def mmg_remesh(
             mmg2d_path, V, F, feature_edges, required_vertices, required_edges,
             metric, hgrad, nosizreq)
     if len(F_out) == 0:
-        raise ValueError(f"mmg2d returned no triangles ({len(V_out)} vertices)")
+        # mmg reported success: a bug to look at, like its other failures, not a retry
+        raise RuntimeError(f"mmg2d returned no triangles ({len(V_out)} vertices)")
     tagged_edges_out: Dict[int, List[Tuple[int, int]]] = {}
     for (v0, v1), tag in zip(E.tolist(), E_ref.tolist()):
         tagged_edges_out.setdefault(tag, []).append((v0, v1))
@@ -1034,7 +1035,7 @@ def remesh_with_error_and_edge_metric(
     prev_avg_error: Optional[float] = None
     stagnation_count = 0
 
-    # mmg RuntimeError, mmg_remesh's ValueError on an empty result and
+    # mmg RuntimeError (failure, timeout, empty result) and
     # degenerate-UV-triangle exceptions from
     # compute_triangle_approximation_errors propagate to the caller;
     # run_initial_meshing_for_face's outer try/except routes them to the
