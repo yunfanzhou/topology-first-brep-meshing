@@ -13,21 +13,90 @@ def square():
     return V, construct_connectivity_data(V, [[0, 1, 2], [0, 2, 3]])
 
 
-def test_second_heuristic_value_error_runs_fallback(monkeypatch):
-    # a ValueError from the second heuristic (boundary prohibited) is a failure like
-    # one from the first: the fallback runs instead of the error leaving the function
+def initial_loop_new(is_last_attempt):
+    V, conn = square()
+    return trace.trace_initial_loop_new(V, conn, PatchRegularSpaceData(), LoopTopologyData(), LoopGeometryData(), [],
+                                        InitialLoopTracingData(), ignore_trace_geometry=True,
+                                        is_last_attempt=is_last_attempt)
+
+
+def stub_initial_loop(monkeypatch, heuristic_results, fallback=None):
+    """Stub the heuristic (one result per call: True = failed, False = ok, an exception = raised)
+    and the hard fallback; returns the list of calls."""
+    results = iter(heuristic_results)
     calls = []
 
     def heuristic(*args, **kwargs):
         calls.append("heuristic")
-        raise ValueError("No valid path found among closest candidates")
+        r = next(results)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def run_fallback(*args, **kwargs):
+        calls.append("fallback")
+        if fallback is not None:
+            raise fallback
 
     monkeypatch.setattr(trace, "trace_initial_loop_with_heuristics", heuristic)
-    monkeypatch.setattr(trace, "trace_initial_loop_fallback", lambda *args, **kwargs: calls.append("fallback"))
-    V, conn = square()
-    trace.trace_initial_loop_new(V, conn, PatchRegularSpaceData(), LoopTopologyData(), LoopGeometryData(), [],
-                                 InitialLoopTracingData(), ignore_trace_geometry=True)
-    assert calls == ["heuristic", "heuristic", "fallback"]
+    monkeypatch.setattr(trace, "trace_initial_loop_fallback", run_fallback)
+    return calls
+
+
+NO_PATH = ValueError("No valid path found among closest candidates")
+
+
+@pytest.mark.parametrize("first", [True, NO_PATH])
+def test_first_heuristic_failure_retries_the_face_before_the_last_attempt(monkeypatch, first):
+    # a failed first heuristic means the mesh is not fine enough: ValueError (mesh_one_face
+    # retries on a refined mesh), no second heuristic, no fallback
+    calls = stub_initial_loop(monkeypatch, [first])
+    with pytest.raises(ValueError):
+        initial_loop_new(is_last_attempt=False)
+    assert calls == ["heuristic"]
+
+
+@pytest.mark.parametrize("results, expected_calls, fallback_used", [
+    ([False], ["heuristic"], False),
+    ([True, False], ["heuristic", "heuristic"], False),
+    ([NO_PATH, False], ["heuristic", "heuristic"], False),
+    ([True, True], ["heuristic", "heuristic", "fallback"], True),
+    ([NO_PATH, NO_PATH], ["heuristic", "heuristic", "fallback"], True),
+])
+def test_last_attempt_runs_second_heuristic_then_fallback(monkeypatch, results, expected_calls, fallback_used):
+    # the return value is summary["initial_loop_fallback"]
+    calls = stub_initial_loop(monkeypatch, results)
+    assert initial_loop_new(is_last_attempt=True) is fallback_used
+    assert calls == expected_calls
+
+
+def test_first_heuristic_success_needs_no_last_attempt(monkeypatch):
+    calls = stub_initial_loop(monkeypatch, [False])
+    assert initial_loop_new(is_last_attempt=False) is False
+    assert calls == ["heuristic"]
+
+
+def test_fallback_value_error_is_a_bug(monkeypatch):
+    # the hard fallback must always succeed: its ValueError ends the run instead of failing the face
+    cause = ValueError("Error: The initial loop fallback tracing failed.")
+    stub_initial_loop(monkeypatch, [True, True], fallback=cause)
+    with pytest.raises(RuntimeError, match="must always succeed") as info:
+        initial_loop_new(is_last_attempt=True)
+    assert info.value.__cause__ is cause
+
+
+@pytest.mark.parametrize("exc", [IndexError("list index out of range"), RuntimeError("bug")])
+def test_non_value_errors_are_not_caught(monkeypatch, exc):
+    stub_initial_loop(monkeypatch, [exc])
+    with pytest.raises(type(exc)):
+        initial_loop_new(is_last_attempt=True)
+
+
+def test_no_progress_error_is_a_sub_loop_closure_error():
+    # so trace_all_loops_one_patch first retraces the non-initial loops without corner reuse
+    e = ValueError("Error: Non initial loop fallback tracing made no progress: trapped loops [1] are already treated.")
+    assert trace.is_sub_loop_closure_error(e)
+    assert not trace.is_sub_loop_closure_error(ValueError("Error: Non initial loop fallback tracing failed."))
 
 
 def test_non_initial_fallback_stops_when_trapped_loops_repeat(monkeypatch):
@@ -160,18 +229,3 @@ def test_non_initial_fallback_skips_degenerate_halfedges(monkeypatch):
     assert loop_tracing_data.feature_id_to_edge_tracing_data[2][-1] == 5
     assert 0 not in loop_tracing_data.traced_id_set
     assert len(prunes) == 1
-
-
-@pytest.mark.parametrize("heuristic_failed, fallback_used", [([False], False),
-                                                              ([True, False], False),
-                                                              ([True, True], True)])
-def test_initial_loop_new_returns_whether_fallback_ran(monkeypatch, heuristic_failed, fallback_used):
-    # the return value is summary["initial_loop_fallback"]
-    results = iter(heuristic_failed)
-    calls = []
-    monkeypatch.setattr(trace, "trace_initial_loop_with_heuristics", lambda *args, **kwargs: next(results))
-    monkeypatch.setattr(trace, "trace_initial_loop_fallback", lambda *args, **kwargs: calls.append("fallback"))
-    V, conn = square()
-    assert trace.trace_initial_loop_new(V, conn, PatchRegularSpaceData(), LoopTopologyData(), LoopGeometryData(), [],
-                                        InitialLoopTracingData(), ignore_trace_geometry=True) is fallback_used
-    assert calls == (["fallback"] if fallback_used else [])

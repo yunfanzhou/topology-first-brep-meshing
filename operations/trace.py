@@ -303,7 +303,22 @@ def trace_initial_loop_new(V,
                        initial_loop_tracing_data,
                        ignore_trace_geometry,
                        is_last_attempt=False):
-    # Returns whether trace_initial_loop_fallback ran (summary["initial_loop_fallback"]).
+    # Traces the initial loop. Returns whether trace_initial_loop_fallback ran
+    # (summary["initial_loop_fallback"]).
+    #
+    # The first heuristic gives the traces with good geometry, and on a mesh that is fine enough
+    # it succeeds. So its failure means "refine", and the two last resorts only run when no
+    # refinement is left:
+    #
+    #   before the last attempt:  1st heuristic -- ok ----> done
+    #                                           -- fails -> ValueError: mesh_one_face retries the
+    #                                                       face on a refined mesh
+    #   last attempt:             1st heuristic -- fails -> 2nd heuristic (boundary prohibited)
+    #                                           -- fails -> hard fallback
+    #
+    # "fails" is a returned failure (traced, wrong topology) or a ValueError. The hard fallback
+    # must always succeed: a ValueError from it is a bug and is re-raised as RuntimeError, which
+    # ends the run. Any other exception is a bug as well and is not caught here.
     initial_fallback_used = False
     # add singularity corners
     if initial_loop_tracing_data.singularity_corner_mapping:
@@ -323,9 +338,14 @@ def trace_initial_loop_new(V,
                                                         ignore_trace_geometry=ignore_trace_geometry)
     except ValueError as e:
         print_if_verbose(f"Initial loop tracing raised error: {e}")
+        if not is_last_attempt:
+            raise  # not refined enough: retry the face on a refined mesh
         initial_trace_failed = True
+    if initial_trace_failed and not is_last_attempt:
+        raise ValueError("Error: The first heuristic traced the initial loop with the wrong topology; "
+                         "the face is retried on a refined mesh.")
     if initial_trace_failed:
-        print_if_verbose("Initial loop tracing failed again in first heuristic, soft fallback.")
+        print_if_verbose("Initial loop tracing failed in first heuristic on the last attempt, soft fallback.")
 
         #restore the saved state
         restore_connectivity(V,
@@ -377,15 +397,19 @@ def trace_initial_loop_new(V,
                 patch_regular_space_data.prohibited_vids_set.add(edge[0])
                 patch_regular_space_data.prohibited_vids_set.add(edge[1])
             # finally do the fall back tracing
-            trace_initial_loop_fallback(V,
-                                    connectivity,
-                                    patch_regular_space_data,
-                                    loop_topology_data,
-                                    loop_geometry_data,
-                                    surface_merged_edges,
-                                    initial_loop_tracing_data,
-                                    ignore_trace_geometry,
-                                    is_last_attempt=is_last_attempt)
+            try:
+                trace_initial_loop_fallback(V,
+                                        connectivity,
+                                        patch_regular_space_data,
+                                        loop_topology_data,
+                                        loop_geometry_data,
+                                        surface_merged_edges,
+                                        initial_loop_tracing_data,
+                                        ignore_trace_geometry,
+                                        is_last_attempt=is_last_attempt)
+            except ValueError as e:
+                raise RuntimeError(f"Initial loop fallback failed: {e}. "
+                                   f"The fallback must always succeed: this is a bug.") from e
             initial_fallback_used = True
     
     # After all tracing have finished now add the degenerate feature edge vids to the mapping
@@ -1261,7 +1285,11 @@ def is_sub_loop_closure_error(error):
     # previously traced loops inside. Excludes unrelated failures like
     # nonmanifold meshes or excessive traced distance.
     msg = str(error).lower()
-    return ("sub-loop closure produced unexpected component structure with no trapped previous loops." in msg)
+    # "made no progress": the fallback's retrace trapped only loops that are already bridged to
+    # the boundary, which needs a corner shared with a trapped loop; retracing without corner
+    # reuse removes that corner.
+    return ("sub-loop closure produced unexpected component structure with no trapped previous loops." in msg
+            or "non initial loop fallback tracing made no progress" in msg)
 
 
 def snapshot_regular_space_data(regular_space_data):
