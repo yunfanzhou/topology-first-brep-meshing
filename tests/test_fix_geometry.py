@@ -66,10 +66,13 @@ def test_shared_corner_is_constrained_once_in_harmonic_solve():
     assert np.allclose(newV[6], [0.3, 0.3, -0.1])
 
 
-def test_shared_corner_with_conflicting_targets_raises():
+def test_shared_corner_takes_the_target_of_the_first_feature():
+    """The copies of a corner are found by vertex id, not by comparing positions: a target that
+    differs by rounding on another feature (e.g. an apex matched with np.allclose) is no error."""
     V, F, geometry, tracing = triangle_loop_patch(p0_on_feature_12=(0.0, 0.0, 1e-6))
-    with pytest.raises(ValueError, match="Boundary vertex 0"):
-        get_patch_boundary_condition(V, geometry, tracing)
+    bi, bp = get_patch_boundary_condition(V, geometry, tracing)
+    assert [int(v) for v in bi] == [0, 1, 2, 3, 4, 5]
+    assert np.array_equal(bp[0], [0.0, 0.0, 0.0])  # feature 10's end, not feature 12's
 
 
 @pytest.mark.parametrize("edge", [(0, 1), (1, 0)])

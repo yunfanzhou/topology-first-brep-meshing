@@ -86,37 +86,35 @@ def get_boundary_index_and_positions(feature_edge_vids, feature_edge_to_polyline
 def get_patch_boundary_condition(V,
                                  patch_loop_geometry_data: dict[int, LoopGeometryData],
                                  patch_tracing_data: PatchTracingData):
-    patch_bi = list()
-    patch_bp = list()
+    # vid -> target position, one entry per constrained vertex
+    patch_bc = dict()
     initial_loop_id = patch_tracing_data.initial_loop_tracing_data.initial_loop_id
     for loop_id, loop_geometry_data in patch_loop_geometry_data.items():
         if loop_id == initial_loop_id:
             get_loop_boundary_condition(V,
                                         loop_geometry_data,
                                         patch_tracing_data.initial_loop_tracing_data.loop_tracing_data,
-                                        patch_bi,
-                                        patch_bp)
+                                        patch_bc)
         else:
             get_loop_boundary_condition(V, 
                                         loop_geometry_data, 
                                         patch_tracing_data.remaining_loops_tracing_data[loop_id], 
-                                        patch_bi, 
-                                        patch_bp)
-    # A corner is listed by every traced feature ending at it: keep one constraint per vertex,
-    # otherwise the harmonic solve counts the corner's displacement once per copy.
-    patch_bp = np.asarray(patch_bp, dtype=np.float64).reshape(-1, 3)
-    bi, first, inverse = np.unique(np.asarray(patch_bi, dtype=np.int64), return_index=True, return_inverse=True)
-    mismatch = np.any(patch_bp != patch_bp[first][inverse], axis=1)
-    if np.any(mismatch):
-        vid = patch_bi[int(np.argmax(mismatch))]
-        raise ValueError(f"Boundary vertex {vid} has different target positions on different traced feature edges")
-    return bi, patch_bp[first]
+                                        patch_bc)
+    bi = np.array(sorted(patch_bc), dtype=np.int64)
+    bp = np.array([patch_bc[vid] for vid in bi], dtype=np.float64).reshape(-1, 3)
+    return bi, bp
 
 def get_loop_boundary_condition(V,
                                 loop_geometry_data,
                                 loop_tracing_data,
-                                patch_bi: list,
-                                patch_bp: list):
+                                patch_bc: dict):
+    # Adds the constraints of the loop's traced features to patch_bc (vid -> target position),
+    # one per vertex. The duplicates are decided by the tracing topology, not by comparing
+    # positions: a traced vertex belongs to one feature, except the feature's two end vertices,
+    # which are corners and are shared with the other features ending there. So a feature's
+    # interior vertices are constrained by that feature, and a corner is constrained once, by
+    # the first feature that ends at it. (Listing a corner once per feature would duplicate its
+    # column in the harmonic solve and count its displacement once per copy.)
     for feature_id, traced_vids in loop_tracing_data.feature_id_to_edge_tracing_data.items():
         if len(loop_geometry_data.feature_id_poly_V_True_orientation[feature_id]) == 0:
             continue
@@ -132,8 +130,12 @@ def get_loop_boundary_condition(V,
                                                                                    V)
         bi, bp = get_boundary_index_and_positions(traced_vids, 
                                                   upsampled_feature_polyline_V)
-        patch_bi.extend(bi)
-        patch_bp.extend(bp)
+        corner_vids = {traced_vids[0], traced_vids[-1]}
+        for vid, position in zip(bi, bp):
+            if vid in corner_vids:
+                patch_bc.setdefault(vid, position)
+            else:
+                patch_bc[vid] = position
 
 def adjacency_matrix(F, n_vertices):
     """
