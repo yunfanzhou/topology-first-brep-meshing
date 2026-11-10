@@ -273,6 +273,40 @@ def edit_loops_with_shared_corners(V, F,
 
     return V, connectivity.F
 
+def map_degenerate_corners_to_apex_vids(patch_data, patch_singularity, all_corners_for_part, patch_tracing_data):
+    """Record the apex vertex of every degenerate corner that sits at a singularity.
+
+    The apex vids are stored for the initial loop only (singularity_corner_mapping and the initial
+    loop's corner_id_to_vid): an apex lies on a collapsed side of the parameter domain, so it is
+    on the outer loop, which is the initial loop. A non-initial loop would see it only through
+    the shared corner map, which is not passed when corner reuse is disabled. An apex corner
+    outside the initial loop breaks that assumption: it is a bug (or an input the pipeline does
+    not support), so it raises RuntimeError, which ends the run, not a ValueError to retry.
+    """
+    patch_degenerate_corner_id_set = find_degenerate_corners(patch_data)
+    if patch_singularity is None:
+        return
+    initial_loop_id = patch_data.initial_loop_id
+    initial_loop_corner_ids = set()
+    for halfedge in patch_data.patch_loop_topology_data[initial_loop_id].halfedges:
+        initial_loop_corner_ids.add(halfedge.start_corner_id)
+        initial_loop_corner_ids.add(halfedge.end_corner_id)
+    for corner in patch_degenerate_corner_id_set:
+        corner_position = all_corners_for_part.corner_id_to_position[corner]
+        if corner_position is not None:
+            for singularity in patch_singularity:
+                if np.allclose(singularity.position, corner_position):
+                    if corner not in initial_loop_corner_ids:
+                        raise RuntimeError(
+                            f"Apex corner {corner} (singularity at {np.asarray(singularity.position).tolist()}) "
+                            f"is not on the initial loop {initial_loop_id}: apex vertices are recorded "
+                            f"for the initial loop only. This is a bug.")
+                    apex_vid = singularity.singularity_vids[0]
+                    patch_tracing_data.initial_loop_tracing_data.singularity_corner_mapping[corner] = apex_vid
+                    patch_tracing_data.initial_loop_tracing_data.loop_tracing_data.corner_id_to_vid[corner] = apex_vid
+                    break
+
+
 def local_step_one_patch(patch_id,
                          patch_data,
                          patch_singularity,
@@ -289,17 +323,7 @@ def local_step_one_patch(patch_id,
     patch_tracing_data = PatchTracingData()
     patch_tracing_data.initial_loop_tracing_data.initial_loop_id = patch_data.initial_loop_id
     # --- 1. Map degenerate corners to singularity apex vids ---
-    patch_degenerate_corner_id_set = find_degenerate_corners(patch_data)
-    if patch_singularity is not None:
-        for corner in patch_degenerate_corner_id_set:
-            corner_position = all_corners_for_part.corner_id_to_position[corner]
-            if corner_position is not None:
-                for singularity in patch_singularity:
-                    if np.allclose(singularity.position, corner_position):
-                        apex_vid = singularity.singularity_vids[0]
-                        patch_tracing_data.initial_loop_tracing_data.singularity_corner_mapping[corner] = apex_vid
-                        patch_tracing_data.initial_loop_tracing_data.loop_tracing_data.corner_id_to_vid[corner] = apex_vid
-                        break
+    map_degenerate_corners_to_apex_vids(patch_data, patch_singularity, all_corners_for_part, patch_tracing_data)
 
     # Check mesh manifoldness after preprocessing
     if not igl.is_edge_manifold(np.array(connectivity.F)):

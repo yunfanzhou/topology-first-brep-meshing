@@ -87,3 +87,40 @@ def test_hard_fallback_maps_apex_corner_to_stitched_vertex():
     init2.loop_tracing_data.corner_id_to_vid = {0: 7}
     adopt_stitched_apex(init2, {0: 7})
     assert init2.singularity_corner_mapping == {0: 7}
+
+
+def apex_patch(apex_loop_id):
+    """Two loops: 0 (initial, corners 0 and 1) and 1 (a hole, corners 2 and 3). The degenerate
+    feature 20, with apex corner 0 or 2, is put on loop apex_loop_id; the singularity is vertex 7."""
+    from utils.data_structures import (CornerData, LoopGeometryData, PatchInputData, PatchTracingData,
+                                       SingularityData)
+    apex = np.array([0.0, 0.0, 1.0])
+    line = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+    apex_corner = 0 if apex_loop_id == 0 else 2
+    topology = {0: LoopTopologyData([HalfEdge(10, True, False, 0, 1), HalfEdge(11, True, False, 1, 0)]),
+                1: LoopTopologyData([HalfEdge(12, True, False, 2, 3), HalfEdge(13, True, False, 3, 2)])}
+    geometry = {0: LoopGeometryData({10: line, 11: line[::-1]}), 1: LoopGeometryData({12: line, 13: line[::-1]})}
+    topology[apex_loop_id].halfedges.append(HalfEdge(20, True, False, apex_corner, apex_corner))
+    geometry[apex_loop_id].feature_id_poly_V_True_orientation[20] = np.zeros((0, 3))
+    patch = PatchInputData(initial_loop_id=0, patch_loop_geometry_data=geometry, patch_loop_topology_data=topology)
+    corners = CornerData({0: apex, 1: line[1], 2: apex, 3: line[1]})
+    tracing = PatchTracingData()
+    tracing.initial_loop_tracing_data.initial_loop_id = 0
+    return patch, [SingularityData([7], apex)], corners, tracing, apex_corner
+
+
+def test_apex_corner_on_initial_loop_is_mapped():
+    from run_one_patch import map_degenerate_corners_to_apex_vids
+    patch, singularities, corners, tracing, apex_corner = apex_patch(apex_loop_id=0)
+    map_degenerate_corners_to_apex_vids(patch, singularities, corners, tracing)
+    init = tracing.initial_loop_tracing_data
+    assert init.singularity_corner_mapping == {apex_corner: 7}
+    assert init.loop_tracing_data.corner_id_to_vid == {apex_corner: 7}
+
+
+def test_apex_corner_outside_initial_loop_is_a_bug():
+    # apex vids are recorded for the initial loop only: RuntimeError (ends the run), not a retry
+    from run_one_patch import map_degenerate_corners_to_apex_vids
+    patch, singularities, corners, tracing, _ = apex_patch(apex_loop_id=1)
+    with pytest.raises(RuntimeError, match="Apex corner 2 .* is not on the initial loop 0"):
+        map_degenerate_corners_to_apex_vids(patch, singularities, corners, tracing)
