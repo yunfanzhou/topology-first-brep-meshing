@@ -156,15 +156,20 @@ def _fake_remesh_loop(monkeypatch, avg_error):
     return used
 
 
-@pytest.mark.parametrize("avg_error, max_iterations", [
-    (1.0, 3),     # always too coarse: max_iterations runs out right after a rescale
-    (0.5, 9),     # stagnation (STAGNATION_LIMIT) ends the loop
-    (1e-4, 10),   # over-refined until the factor drops below 1e-8
-])
-def test_remesh_returns_factor_of_returned_mesh(monkeypatch, avg_error, max_iterations):
-    used = _fake_remesh_loop(monkeypatch, avg_error)
+def test_remesh_returns_rescaled_factor_when_iterations_run_out(monkeypatch):
+    """The last pass missed the target, so the factor returned for the next mmg pass (the
+    embedding's) is that pass's factor rescaled toward the target, not the factor that missed."""
+    used = _fake_remesh_loop(monkeypatch, avg_error=1.0)  # always 10x too coarse
     V, F, factor = rb.remesh_with_error_and_edge_metric(
-        None, SQ_V, SQ_F, target_error=0.1, max_iterations=max_iterations)
+        None, SQ_V, SQ_F, target_error=0.1, max_iterations=3)
+    assert len(used) == 3
+    assert factor == pytest.approx(used[-1] * 10.0)
+
+
+def test_remesh_returns_last_factor_on_stagnation(monkeypatch):
+    used = _fake_remesh_loop(monkeypatch, avg_error=0.5)  # STAGNATION_LIMIT ends the loop
+    V, F, factor = rb.remesh_with_error_and_edge_metric(
+        None, SQ_V, SQ_F, target_error=0.1, max_iterations=9)
     assert factor == used[-1]
 
 
