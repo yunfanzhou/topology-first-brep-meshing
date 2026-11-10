@@ -75,9 +75,9 @@ def mesh_one_face(face, edge_geometry_data, all_corners, target_error, mmg2d_pat
     success or error on failure. target_error is the model's; only the first attempt remeshes
     with it. A retry (attempt k > 0) runs no mmg: it refines the UV mesh saved by the first
     attempt (or the initial grid if there is none) with k levels of igl.upsample, then runs the
-    local step again on it. An attempt that raises an Exception is retried, and the face fails
-    after the last one. MemoryError is re-raised, and CollapsedInteriorIsoLineError (a
-    BaseException) passes through: both end the run.
+    local step again on it. Only ValueError is retried: it marks a failure that a finer mesh
+    can fix, and the face fails after the last attempt. Any other exception is a bug and ends
+    the run with its traceback.
     """
     patch_id = face.id
     config.current_patch_id = patch_id  # labels oversized-patch dumps
@@ -120,15 +120,12 @@ def mesh_one_face(face, edge_geometry_data, all_corners, target_error, mmg2d_pat
             return dict(ok=True, patch_id=patch_id, V=linear_solved_V, connectivity=connectivity,
                         tracing=aggregated_tracing_data, summary=patch_summary, attempts=attempt + 1,
                         duration=(datetime.now() - patch_start_time).total_seconds())
-        except MemoryError:
-            raise  # a retry runs on an upsampled mesh: it would need more memory
-        except Exception as e:
-            error = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+        except ValueError as e:
             print_if_verbose(
-                f"!!!!! Local steps failed for patch {patch_id} on attempt {attempt} due to: {error} !!!!!"
+                f"!!!!! Local steps failed for patch {patch_id} on attempt {attempt} due to: {e} !!!!!"
             )
             if attempt == ATTEMPT_MAX - 1:
-                return dict(ok=False, patch_id=patch_id, error=error, attempts=attempt + 1,
+                return dict(ok=False, patch_id=patch_id, error=str(e), attempts=attempt + 1,
                             duration=(datetime.now() - patch_start_time).total_seconds())
 
 

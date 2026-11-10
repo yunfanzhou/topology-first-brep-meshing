@@ -129,22 +129,28 @@ def failing_initial_meshing(monkeypatch, exc):
     return main, calls
 
 
-@pytest.mark.parametrize("exc", [RuntimeError("mmg failed"), AssertionError(), IndexError("out of range"),
-                                 Exception("No progress made"), ValueError("not edge manifold")])
-def test_mesh_one_face_retries_any_exception(monkeypatch, exc):
-    main, calls = failing_initial_meshing(monkeypatch, exc)
+def test_mesh_one_face_retries_value_error(monkeypatch):
+    main, calls = failing_initial_meshing(monkeypatch, ValueError("not edge manifold"))
     r = main.mesh_one_face(FakeFace(), {}, None, 0.1, "mmg2d_O3", 1.0)
     assert calls == list(range(main.ATTEMPT_MAX))
     assert not r["ok"] and r["patch_id"] == 7 and r["attempts"] == main.ATTEMPT_MAX
-    assert r["error"] == (str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}")
+    assert r["error"] == "not edge manifold"
 
 
-@pytest.mark.parametrize("exc_type", ["MemoryError", "CollapsedInteriorIsoLineError"])
-def test_mesh_one_face_does_not_retry_fatal_errors(monkeypatch, exc_type):
+@pytest.mark.parametrize("exc", [RuntimeError("mmg failed"), AssertionError(), IndexError("out of range"),
+                                 Exception("No progress made"), MemoryError("fatal")])
+def test_mesh_one_face_does_not_retry_other_exceptions(monkeypatch, exc):
+    """Anything but ValueError is a bug: it ends the run on the first attempt."""
+    main, calls = failing_initial_meshing(monkeypatch, exc)
+    with pytest.raises(type(exc)):
+        main.mesh_one_face(FakeFace(), {}, None, 0.1, "mmg2d_O3", 1.0)
+    assert calls == [0]
+
+
+def test_mesh_one_face_does_not_retry_collapsed_iso_line(monkeypatch):
     import initial_meshing
-    exc_class = MemoryError if exc_type == "MemoryError" else initial_meshing.CollapsedInteriorIsoLineError
-    main, calls = failing_initial_meshing(monkeypatch, exc_class("fatal"))
-    with pytest.raises(exc_class):
+    main, calls = failing_initial_meshing(monkeypatch, initial_meshing.CollapsedInteriorIsoLineError("fatal"))
+    with pytest.raises(initial_meshing.CollapsedInteriorIsoLineError):
         main.mesh_one_face(FakeFace(), {}, None, 0.1, "mmg2d_O3", 1.0)
     assert calls == [0]
 
