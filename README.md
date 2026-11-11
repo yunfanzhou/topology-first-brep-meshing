@@ -76,8 +76,10 @@ python check_topology.py data/simple/Box.hdf5 out/Box
 ```
 
 `--error_rel` is the forward stage's target geometric error (default 1e-3) and `--len_rel` the remeshing
-target edge length (default 0.05), both relative to the bounding box diagonal. They are different
-quantities and are set independently: the forward stage has no edge length to match.
+target edge length, both relative to the bounding box diagonal. They are different quantities and are set
+independently: the forward stage has no edge length to match. Without `--len_rel`, the remeshing is given
+no target and uses the average edge length of the fused mesh, so it keeps the forward mesh's resolution;
+`--len_rel 0.05`, as in the example, coarsens it.
 
 `remesh.py --cleanup_angle A` also repairs, after every remeshing iteration, the triangles whose smallest
 angle is under A degrees (wildmeshing-toolkit's `cleanup_angle`). It is off by default: the repair is

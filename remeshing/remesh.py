@@ -1,13 +1,15 @@
 """Remeshing stage: remeshes the forward stage's fused.pkl with wildmeshing-toolkit's isotropic remeshing.
 
-usage: python remeshing/remesh.py <output_folder> [--len_rel 0.05] [--cleanup_angle 0] [--threads 0]
+usage: python remeshing/remesh.py <output_folder> [--len_rel L] [--cleanup_angle 0] [--threads 0]
 
 <output_folder> is the folder main.py wrote fused.pkl into. Runs the isotropic remeshing of the
 wildmeshing package (requirements.txt) in memory on the fused mesh with its patch ids, its feature
 chains and its corners, which it keeps, and writes remeshed.vtu, remeshed_edges.vtu and
 remeshed_report.json (see README).
---len_rel is the target edge length relative to the bounding box diagonal (default 0.05). It is
-independent of the forward stage's --error_rel, which is a geometric error, not a length.
+By default no target edge length is given and the remeshing uses the average edge length of the fused
+mesh, so it keeps the forward mesh's resolution. --len_rel L sets the target to L times the bounding box
+diagonal instead (0.05, the value of the paper's experiments, coarsens it). It is independent of the
+forward stage's --error_rel, which is a geometric error, not a length.
 --cleanup_angle A repairs, after every iteration, the triangles whose smallest angle is under A degrees
 (collapse, swap or vertex move). It is off by default (0): it runs serially over most of the mesh while
 a fine forward mesh is coarsened, and took 97% of the remeshing time (20 min of 20.5) on a 517k-triangle
@@ -56,7 +58,7 @@ def features(V, edge2chain, corner2vid):
     return {"V": V, "cells": cells}
 
 
-def remesh(V, F, patch, edge2chain, corner2vid, len_rel, threads=0, cleanup_angle=0.0):
+def remesh(V, F, patch, edge2chain, corner2vid, len_rel=None, threads=0, cleanup_angle=0.0):
     """Remeshes (V, F) in memory, keeping the patches, the chains and the corners. Returns the
     remeshed vertices and triangles, the patch id of each triangle, the B-rep vertex id of each
     vertex (-1 for none), the chain edges with their B-rep edge ids, and the remeshing's report."""
@@ -72,7 +74,8 @@ def remesh(V, F, patch, edge2chain, corner2vid, len_rel, threads=0, cleanup_angl
         "input": "surface",
         "features": "features",
         "feature_fields": ["patch_id"],  # carried to every remeshed triangle
-        "length_rel": len_rel,
+        # no target given: negative, and the remeshing takes the input's average edge length
+        "length_rel": -1.0 if len_rel is None else len_rel,
         "eps_rel": eps_rel,
         "use_sample_envelope": True,
         "max_iterations": 3,
@@ -95,8 +98,9 @@ def remesh(V, F, patch, edge2chain, corner2vid, len_rel, threads=0, cleanup_angl
 def main():
     parser = argparse.ArgumentParser(description="Remesh the forward stage output with wildmeshing-toolkit.")
     parser.add_argument("output_folder", type=str, help="Folder containing fused.pkl from main.py")
-    parser.add_argument("--len_rel", type=float, default=0.05,
-                        help="Target edge length relative to the bounding box diagonal (default: 0.05)")
+    parser.add_argument("--len_rel", type=float, default=None,
+                        help="Target edge length relative to the bounding box diagonal (default: none given, "
+                             "the remeshing uses the average edge length of the fused mesh)")
     parser.add_argument("--cleanup_angle", type=float, default=0.0,
                         help="Repair, after every iteration, the triangles whose smallest angle is under this "
                              "many degrees (default: 0, no repair; the repair is slow on fine forward meshes)")
