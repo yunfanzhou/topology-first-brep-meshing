@@ -34,11 +34,35 @@ The two C++ tools the pipeline calls also come from `requirements.txt`:
   `utils/config.py`). `--mmg binary` runs its `mmg2d_O3` executable on files instead, the one in the
   mmgpy package or the build `--mmg2d_path` names; the meshes are the same, bit for bit.
 - The isotropic remeshing (remeshing stage) is wildmeshing-toolkit's Python package `wildmeshing`, which
-  pip builds from source (pinned commit). This needs git, a C++17 compiler (the Xcode command-line tools on
-  macOS, g++ or clang on Linux, Visual Studio on Windows) and GMP on Linux (`apt install libgmp-dev`) and
-  macOS (`brew install gmp`); on Windows the build downloads GMP. CMake comes from PyPI. The build
-  downloads about 30 dependencies and takes several minutes (about 4 on a 16-core laptop), with about 2.5
-  GB of memory per compile job; set `CMAKE_BUILD_PARALLEL_LEVEL` on smaller machines.
+  pip builds from source (pinned commit). This needs git, a C++ compiler with C++20 library support (the
+  Xcode command-line tools 16.3 or newer on macOS, g++ or clang on Linux, Visual Studio on Windows) and GMP
+  on Linux (`apt install libgmp-dev`) and macOS (`brew install gmp`); on Windows the build downloads GMP.
+  CMake comes from PyPI. The build downloads about 30 dependencies and takes several minutes (about 4 on a
+  16-core laptop), with about 2.5 GB of memory per compile job; set `CMAKE_BUILD_PARALLEL_LEVEL` on smaller
+  machines.
+
+  The pinned commit builds with a limited range of compilers. On macOS:
+
+  | Compiler | Result |
+  |---|---|
+  | Command-line tools 16.2 (Apple clang 16) | fails: `no member named 'atomic_ref' in namespace 'std'` |
+  | Homebrew LLVM 19.1.7 | builds, with the command below |
+  | Homebrew LLVM 23.1.5 | fails: `no template named 'vector' in namespace 'std'` (in a dependency) |
+
+  With command-line tools older than 16.3, install LLVM 19 (`brew install llvm@19`; it is not put on the
+  PATH and does not replace Apple's compiler) and build `wildmeshing` with it:
+
+  ```
+  L=$(brew --prefix llvm@19); SDK=$(xcrun --show-sdk-path)
+  SDKROOT=$SDK CMAKE_ARGS="-DCMAKE_OSX_SYSROOT=$SDK -DCMAKE_CXX_SCAN_FOR_MODULES=OFF" \
+  CC=$L/bin/clang CXX=$L/bin/clang++ LDFLAGS="-L$L/lib/c++ -Wl,-rpath,$L/lib/c++" \
+  pip install "$(grep '^wildmeshing @' requirements.txt)"
+  pip install -r requirements.txt
+  ```
+
+  (Without the two SDK settings, the build of the Python module stops with `'unistd.h' file not found`.)
+  The first `pip install` builds only `wildmeshing`, the line of `requirements.txt` that names it; the
+  second installs the rest with the default compiler.
 
 ## Run
 
