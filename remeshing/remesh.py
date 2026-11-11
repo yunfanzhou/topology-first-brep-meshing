@@ -1,13 +1,13 @@
 """Remeshing stage: remeshes the forward stage's fused.pkl with wildmeshing-toolkit's isotropic remeshing.
 
-usage: python remeshing/remesh.py <output_folder> [--len_rel 1e-3] [--threads 0]
+usage: python remeshing/remesh.py <output_folder> [--len_rel 0.05] [--threads 0]
 
 <output_folder> is the folder main.py wrote fused.pkl into. Runs the isotropic remeshing of the
 wildmeshing package (requirements.txt) in memory on the fused mesh with its patch ids, its feature
 chains and its corners, which it keeps, and writes remeshed.vtu, remeshed_edges.vtu and
 remeshed_report.json (see README).
---len_rel is the target edge length relative to the bounding box diagonal; use the --error_rel of the
-forward run.
+--len_rel is the target edge length relative to the bounding box diagonal (default 0.05). It is
+independent of the forward stage's --error_rel, which is a geometric error, not a length.
 """
 import argparse
 import json
@@ -91,9 +91,8 @@ def remesh(V, F, patch, edge2chain, corner2vid, len_rel, threads=0):
 def main():
     parser = argparse.ArgumentParser(description="Remesh the forward stage output with wildmeshing-toolkit.")
     parser.add_argument("output_folder", type=str, help="Folder containing fused.pkl from main.py")
-    parser.add_argument("--len_rel", type=float, default=1e-3,
-                        help="Target edge length relative to the bounding box diagonal (default: 1e-3, "
-                             "the default --error_rel of main.py)")
+    parser.add_argument("--len_rel", type=float, default=0.05,
+                        help="Target edge length relative to the bounding box diagonal (default: 0.05)")
     parser.add_argument("--threads", type=int, default=0,
                         help="Threads of the remeshing (default: 0, serial and deterministic)")
     args = parser.parse_args()

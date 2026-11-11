@@ -75,9 +75,9 @@ python remeshing/remesh.py out/Box --len_rel 0.05
 python check_topology.py data/simple/Box.hdf5 out/Box
 ```
 
-`--error_rel` is the forward stage's target geometric error and `--len_rel` the remeshing target edge length,
-both relative to the bounding box diagonal. Use the same value for both; both default to 1e-3. The examples
-use 0.05, which is coarse and fast.
+`--error_rel` is the forward stage's target geometric error (default 1e-3) and `--len_rel` the remeshing
+target edge length (default 0.05), both relative to the bounding box diagonal. They are different
+quantities and are set independently: the forward stage has no edge length to match.
 
 `main.py` meshes the faces in parallel, one process per CPU by default; `--workers N` sets the number of
 processes (`--workers 1` runs serially). The output is the same for any number of workers.
