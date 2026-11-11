@@ -1,6 +1,6 @@
 """Remeshing stage: remeshes the forward stage's fused.pkl with wildmeshing-toolkit's isotropic remeshing.
 
-usage: python remeshing/remesh.py <output_folder> [--len_rel 0.05] [--threads 0]
+usage: python remeshing/remesh.py <output_folder> [--len_rel 0.05] [--cleanup_angle 0] [--threads 0]
 
 <output_folder> is the folder main.py wrote fused.pkl into. Runs the isotropic remeshing of the
 wildmeshing package (requirements.txt) in memory on the fused mesh with its patch ids, its feature
@@ -8,6 +8,10 @@ chains and its corners, which it keeps, and writes remeshed.vtu, remeshed_edges.
 remeshed_report.json (see README).
 --len_rel is the target edge length relative to the bounding box diagonal (default 0.05). It is
 independent of the forward stage's --error_rel, which is a geometric error, not a length.
+--cleanup_angle A repairs, after every iteration, the triangles whose smallest angle is under A degrees
+(collapse, swap or vertex move). It is off by default (0): it runs serially over most of the mesh while
+a fine forward mesh is coarsened, and took 97% of the remeshing time (20 min of 20.5) on a 517k-triangle
+input.
 """
 import argparse
 import json
@@ -52,7 +56,7 @@ def features(V, edge2chain, corner2vid):
     return {"V": V, "cells": cells}
 
 
-def remesh(V, F, patch, edge2chain, corner2vid, len_rel, threads=0):
+def remesh(V, F, patch, edge2chain, corner2vid, len_rel, threads=0, cleanup_angle=0.0):
     """Remeshes (V, F) in memory, keeping the patches, the chains and the corners. Returns the
     remeshed vertices and triangles, the patch id of each triangle, the B-rep vertex id of each
     vertex (-1 for none), the chain edges with their B-rep edge ids, and the remeshing's report."""
@@ -75,7 +79,7 @@ def remesh(V, F, patch, edge2chain, corner2vid, len_rel, threads=0):
         "check_inversions": True,
         "swap_quality": True,
         "limit_collapse_length": True,  # no collapse leaves an edge over 4/3 of the target
-        "cleanup_angle": 40.0,  # repair the triangles under 40 degrees after every iteration
+        "cleanup_angle": float(cleanup_angle),  # > 0: repair the triangles under it after every iteration
         "freeze_boundary": False,  # an open boundary is B-rep edges, which stay as curves
         "remove_duplicate_eps": -1.0,  # fused.pkl is welded already: merge nothing
         "num_threads": threads,
@@ -93,6 +97,9 @@ def main():
     parser.add_argument("output_folder", type=str, help="Folder containing fused.pkl from main.py")
     parser.add_argument("--len_rel", type=float, default=0.05,
                         help="Target edge length relative to the bounding box diagonal (default: 0.05)")
+    parser.add_argument("--cleanup_angle", type=float, default=0.0,
+                        help="Repair, after every iteration, the triangles whose smallest angle is under this "
+                             "many degrees (default: 0, no repair; the repair is slow on fine forward meshes)")
     parser.add_argument("--threads", type=int, default=0,
                         help="Threads of the remeshing (default: 0, serial and deterministic)")
     args = parser.parse_args()
@@ -101,7 +108,8 @@ def main():
     fused = os.path.join(out, "fused.pkl")
     if not os.path.exists(fused):
         raise SystemExit(f"No fused.pkl in {out}; run main.py first.")
-    V, F, patch_id, vertex_id, E, edge_id, report = remesh(*load_fused(fused), args.len_rel, args.threads)
+    V, F, patch_id, vertex_id, E, edge_id, report = remesh(*load_fused(fused), args.len_rel, args.threads,
+                                                           args.cleanup_angle)
 
     meshio.write(os.path.join(out, "remeshed.vtu"), meshio.Mesh(
         V, [("triangle", F)], point_data={"vertex_id": vertex_id}, cell_data={"patch_id": [patch_id]}))

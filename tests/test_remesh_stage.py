@@ -63,3 +63,11 @@ def test_remesh_keeps_patches_chains_and_corners(tmp_path, monkeypatch):
         assert (p != q) == (e in chain)
     # In memory: nothing on the disk.
     assert os.listdir(tmp_path) == []
+
+
+def test_triangle_repair_is_off_unless_asked(tmp_path, monkeypatch):
+    """--cleanup_angle: the repair of small angles is slow on fine forward meshes, so off by default."""
+    monkeypatch.chdir(tmp_path)
+    V, F, patch, edges, corners = cube(8)
+    assert remesh(V, F, patch, edges, corners, 0.1)[-1]["cleanup_angle"] == 0.0
+    assert remesh(V, F, patch, edges, corners, 0.1, cleanup_angle=40.0)[-1]["cleanup_angle"] == 40.0

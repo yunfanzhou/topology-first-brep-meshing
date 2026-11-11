@@ -79,6 +79,11 @@ python check_topology.py data/simple/Box.hdf5 out/Box
 target edge length (default 0.05), both relative to the bounding box diagonal. They are different
 quantities and are set independently: the forward stage has no edge length to match.
 
+`remesh.py --cleanup_angle A` also repairs, after every remeshing iteration, the triangles whose smallest
+angle is under A degrees (wildmeshing-toolkit's `cleanup_angle`). It is off by default: the repair is
+serial and, while a fine forward mesh is coarsened, visits most of the mesh, which made the remeshing 20
+to over 100 times slower on assemblies of 0.5 to 4 million forward triangles.
+
 `main.py` meshes the faces in parallel, one process per CPU by default; `--workers N` sets the number of
 processes (`--workers 1` runs serially). The output is the same for any number of workers.
 
