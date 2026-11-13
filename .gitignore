@@ -14,6 +14,12 @@
 # HPC batch and evaluation scripts, kept local
 metaprogramming/
 
+# outputs of the README commands and the oversized-patch guard
+out/
+oversized_patch_dumps/
+__pycache__/
+.pytest_cache/
+
 # example inputs
 !data/simple/*.hdf5
 

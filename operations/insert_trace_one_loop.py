@@ -1,20 +1,13 @@
-import igl
 import numpy as np
 import utils.dijkstra as dijkstra
-from operations.internal_operations import embed_point_in_triangle, split_edge_in_mesh
-from utils.mesh_utils import adjacency_list, compute_VF, create_edge
-from utils.print import plot_mesh_with_trace, print_with_time, print_if_verbose
-from collections import defaultdict
+from operations.internal_operations import embed_point_in_triangle
+from utils.mesh_utils import adjacency_list
+from utils.print import print_if_verbose
 def project_feature_edge(V, F, feature_edge_polyline_V, feature_edge_orientation=True, myk=8):
     '''Project the feature edge to the mesh.
-    Input: feature_edge_to_polyline_V, feature_edge_to_orientations_current_loop
-    Output:  #points by k(8) matrix of the closest face ids (assuming regular mesh, this is one ring of triangles)
-            note: when k = 1, the return matrix is a 1d array
-            Edit 2025.09.19
-            Always return a matrix. When there is only one vertex in polyline_V, the return a 1 row matrix
-            Edit 2025.12.20
-            Return a dictionary to allow varying number of triangles for different points. 
-            This change is to facilitate keeping track of the closest triangle candidates with local operations. 
+    Input: feature_edge_polyline_V, feature_edge_orientation
+    Output:  #points by k (myk, at most #F) ndarray of the closest face ids (assuming regular mesh, this is one ring of triangles)
+            Always a matrix: when there is only one vertex in polyline_V, it has one row.
     '''
     feature_V_oriented = feature_edge_polyline_V
     if feature_edge_orientation:
@@ -54,9 +47,6 @@ def project_feature_edge_in_same_component(V,
     _, face_indices = tree.query(curve_poly_V, k=actual_k)
     if isinstance(face_indices, np.ndarray) and face_indices.ndim == 1:
         face_indices = face_indices.reshape(1, -1)
-    f_flatten = []
-    for face_row in face_indices:
-        f_flatten.extend(face_row)
 
     # components 'c' is a list of components, each component is a list of face indices
     # build a set for each candidate component for quick membership test
@@ -104,77 +94,20 @@ def trace_two_vertices(V, F,
     # F: faces of the mesh
     # start_vid: the starting vertex id
     # end_vid: the ending vertex id
-    # prohibited_vids: the list of vertex ids that are can be traversed
+    # tracing_prohibited_vids_set: the set of vertex ids that cannot be traversed
+    # adj_list: the vertex adjacency list (computed from F if None)
+    # edge_lengths: dict mapping create_edge(v0, v1) to the edge length (required)
     # Output:
-    # trace_vids: the list of vertex ids that are traced
+    # trace_vids: the list of vertex ids that are traced ([] if there is no path)
+    # distance: the length of the traced path (inf if there is no path)
     if edge_lengths is None:
-        V_np = np.ascontiguousarray(V, dtype=np.float64)
-        F_np = np.ascontiguousarray(F, dtype=np.int64)
-        edge_lengths = igl.edge_lengths(V_np, F_np)
+        raise TypeError("trace_two_vertices requires edge_lengths, a dict mapping each edge to its length")
     if adj_list is None:
         adj_list = adjacency_list(F)
     trace_vids, distance = dijkstra.dijkstra_shortest_path_to_single_target(edge_lengths, adj_list, start_vid, end_vid, tracing_prohibited_vids_set)
     return trace_vids, distance
 
 
-
-def collapse_nonmanifold_prevention(V, F, boundary_vids_set, adj_list, edge_set_to_length, adj_modified_copy_dict, modified_edge_set):
-    ''' checking a condition more strict than the link condition.
-    Specifically, it will check if any the will edit triangles share the edge that is opposite to the apex'''
-    # will_delete_edges = defaultdict(list)
-    will_edit_edges = defaultdict(list)
-    for i in range(len(F)):
-        triangle = F[i]
-        
-        if len(set(triangle) & boundary_vids_set) == 1:
-            for j in range(3):
-                if triangle[j] in boundary_vids_set:
-                    will_edit_edges[i]= create_edge(triangle[(j -1)%3], triangle[(j + 1) % 3])
-                    break
-    vertex_to_face = compute_VF(F)
-    # check link condition for the will delete edges. If fails, split one of the neighboring edge
-    edges_to_split = []
-    # for f, edge in will_delete_edges.items():  # Updated to use .items() for dictionary iteration
-    #     if link_condition(edge, adj_list, is_boundary_edge=True):
-    #         continue
-    #     # we will split edges that are in the link that's not in the current triangle
-    #     neighbors0 = adj_list[edge[0]]
-    #     neighbors1 = adj_list[edge[1]]
-    #     neighbors_intersect = set(neighbors0) & set(neighbors1) 
-    #     # remove the current triangle from the intersection
-    #     neighbors_intersect -= F[f]
-    #     print(f" for edge {edge} neighbors_intersect: {neighbors_intersect}")
-    #     for neighbor in neighbors_intersect:
-    #         edges_to_split.extend([[edge[0], neighbor], [edge[1], neighbor]]) 
-
-    # we also need to check the will edit triangles share edges that are opposite to the apex
-    opposite_edges_set = set()
-    for f, edge in will_edit_edges.items():
-        # edge_set = frozenset(edge)
-        if edge not in opposite_edges_set:
-            opposite_edges_set.add(edge)
-            continue
-        face = F[f]
-        for j in range(3):
-            if face[j] in boundary_vids_set:
-                edges_to_split.append([face[j], edge[0]])
-                edges_to_split.append([face[j], edge[1]])
-    for edge in edges_to_split:
-        add_to_bnd_vids = False
-        v0 = edge[0]
-        v1 = edge[1]
-        if v1 in adj_list[v0]:
-            if len(set(vertex_to_face[v0]) & set(vertex_to_face[v1])) == 1:
-                # the edge is a boundary edge, we need to add the new vid to the boundary_vid list
-                add_to_bnd_vids = True
-            split_edge_in_mesh(V, F, edge, vertex_to_face, new_point= None, faces=None, 
-                                adjacency_list=adj_list, 
-                                edge_mapping_to_length=edge_set_to_length, 
-                                adj_list_copy_dict=adj_modified_copy_dict, 
-                                modified_edge_set=modified_edge_set)
-        if add_to_bnd_vids:
-            boundary_vids_set.add(len(V) - 1)
-    
 def trace_to_find_best_candidate(V,
                                  connectivity,
                                  prev_vid,
@@ -200,5 +133,5 @@ def trace_to_find_best_candidate(V,
                                          connectivity.edge_set_to_length_mapping)
     if dist < float('inf'):
         return current_vid, path_vids, dist
-    print_with_time("No valid path found among closest candidates ")
+    print_if_verbose("No valid path found among closest candidates ")
     raise ValueError("No valid path found among closest candidates")

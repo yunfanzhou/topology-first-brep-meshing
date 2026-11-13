@@ -2,7 +2,7 @@ import numpy as np
 import igl
 from collections import deque as deque   
 from utils.mesh_utils import create_edge
-from utils.print import plot_mesh_with_trace, print_if_verbose
+from utils.print import print_if_verbose
 
 def traced_edge_separated_components(F, tracing_edge_sets, V=None):
     # Find connected components separated by tracing edges
@@ -38,7 +38,6 @@ def marching_inside_loop(F, loop_edges):
                 # Extract edge from the current face
                 face = F[f]
             
-                # edge = frozenset([face[(i ) % 3], face[(i +1) % 3]])
                 edge = create_edge(face[(i ) % 3], face[(i +1) % 3])
                 # If the edge is part of the loop, do not cross it
                 if edge in loop_edges:
@@ -81,8 +80,7 @@ def components_fullfill_2_3_4(F_np,
                                loop_topology_data,
                                loop_tracing_data,
                                traced_edge_sets,
-                               cc,
-                               V= None):
+                               cc):
     ret_component = []
     for i, component in enumerate(cc):
         F_subset = F_np[component]
@@ -95,8 +93,7 @@ def components_fullfill_2_3_4(F_np,
 
 def components_fullfill_2_3(F_np,
                              traced_edge_sets,
-                             cc,
-                             V=None):
+                             cc):
     ret_component = []
     for component in cc:
         F_subset = F_np[component]
@@ -109,8 +106,7 @@ def components_pass_2_4_fail_3(F_np,
                                loop_topology_data,
                                loop_tracing_data,
                                traced_edge_sets,
-                               cc,
-                               V=None):
+                               cc):
     '''Components that meet conditions 2 and 4 but fail condition 3, i.e. annulus
     "disks" whose only defect is one or more untraced boundary loops (holes).
     These are candidates for repair by stitching the untraced hole(s) closed.'''
@@ -206,7 +202,6 @@ def all_traced_edges_in_component(traced_edge_sets,
         component_edge_set.add(create_edge(edge[0], edge[1]))
     if traced_edge_sets.issubset(component_edge_set):
         return True
-    # print_if_verbose("    traced edges not all in component")
     return False
 
 # condition 3: all boundary edges are traced edges
@@ -216,7 +211,6 @@ def all_boundary_edges_are_traced_edges(traced_edge_sets,
     for bnd_edge in boundary_edges:
         bnd_edge_tuple = create_edge(bnd_edge[0], bnd_edge[1])
         if bnd_edge_tuple not in traced_edge_sets:
-            # print_if_verbose(f"    boundary edge {bnd_edge_tuple} not in traced edges")
             return False
     return True
 
@@ -244,11 +238,9 @@ def all_seam_edges_are_interior_edges(loop_topology_data,
         if feature_id not in loop_topology_data.seam_ids_set:
             continue
         
-        traced_vids = traced_vids
         for i in range(len(traced_vids) - 1):
             seam_edge = create_edge(traced_vids[i], traced_vids[i + 1])
             if seam_edge not in interior_edges:
-                # print_if_verbose(f"    seam edge {seam_edge} not in interior edges")
                 return False
     return True
 

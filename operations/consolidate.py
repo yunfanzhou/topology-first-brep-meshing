@@ -1,10 +1,9 @@
 from utils.data_structures import PatchTracingData
-from utils.print import plot_mesh_with_trace, print_if_verbose
-from collections import defaultdict
+from utils.print import print_if_verbose
 def consolidate(V, F):
     # convert F to a set of unique vids
-    old2new = defaultdict(int)
-    new2old = defaultdict(int)
+    old2new = {}
+    new2old = {}
     newF = []
     newV = []
     for face in F:
@@ -51,5 +50,7 @@ def update_corners(corner_to_vid_current_patch, old2new):
     updated_corners = {}
     for corner, vid in corner_to_vid_current_patch.items():
         print_if_verbose(f"corner {corner} vid {vid} ")
+        if vid not in old2new:
+            raise ValueError(f"Corner {corner} maps to vertex {vid}, which is not in the consolidated mesh")
         updated_corners[corner] = old2new[vid]
     return updated_corners

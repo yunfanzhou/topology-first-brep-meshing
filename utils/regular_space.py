@@ -2,7 +2,7 @@ from operations.internal_operations import split_edge_in_mesh, split_edge_in_mes
 from utils.mesh_utils import adjacency_list, create_edge
 import igl
 import numpy as np  
-from utils.print import plot_mesh_with_trace, print_if_verbose, dump_oversized_patch_state
+from utils.print import dump_oversized_patch_state
 
 def construct_patch_initial_regular_space_data(connectivity, patch_regular_space_data):
     # initial regular space include the boundary edges as frozen edge, and their vertices as the prohibited_vids
@@ -26,18 +26,15 @@ def regular_space_using_PRSD(V,
                              patch_regular_space_data):
     # iterate over the previous loops
     for i, tracing_loop_vids in enumerate(patch_regular_space_data.previous_loops):
-        # print_if_verbose(f"          debuggig, reg_space of loop {i}/{len(patch_regular_space_data.previous_loops)}, current #F {len(connectivity.F)}")
         regular_space_each_loop_using_PRSD(V,
                                            connectivity,
                                            patch_regular_space_data,
                                            tracing_loop_vids)
-    # print_if_verbose(f"          debuggig, reg_space of current loop, current #F {len(connectivity.F)}")
     # iterate the current loop
     regular_space_each_loop_using_PRSD(V,
                                        connectivity,
                                        patch_regular_space_data,
                                        patch_regular_space_data.current_loop)
-    # bug fix 12/23/2025
     # There are points that is in prohibited vids but not in the loops (e.g. topology recovery edges in non_initial_loop_fallback)
     # we need to split those edges as well
     rest_of_prohibited = patch_regular_space_data.prohibited_vids_set - set(patch_regular_space_data.current_loop)
@@ -254,5 +251,6 @@ def construct_patch_regular_space_from_tracing_data(regular_space_data,
                 v_end = traced_vids[i+1]
                 traced_edge_set.add(create_edge(v_start, v_end))
     regular_space_data.prohibited_vids_set = prohibited_vids_set
-    regular_space_data.frozen_edges_set = traced_edge_set  # Note: frozen_edges_set with 's'
+    # Separate sets: freezing an edge must not mark it as traced
+    regular_space_data.frozen_edges_set = set(traced_edge_set)  # Note: frozen_edges_set with 's'
     regular_space_data.traced_edge_set = traced_edge_set

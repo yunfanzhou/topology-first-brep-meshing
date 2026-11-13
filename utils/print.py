@@ -11,11 +11,6 @@ def print_if_verbose(message):
     if config.verbose:
         print_with_time(message)
 
-def plot_mesh_with_trace(*args, **kwargs):
-    """Debug plotting hook. The release renders no images; the calls left in the
-    pipeline are no-ops."""
-    return None
-
 # Tracks (patch_id, tag) pairs already dumped, so an oversized patch is
 # captured once per call-site rather than on every repeated call as it keeps
 # growing (each dump is large; re-dumping would defeat "monitoring, not
@@ -30,7 +25,8 @@ def dump_oversized_patch_state(V, F, tag="", threshold=None):
     ``config.oversized_vertex_threshold``), the raw ``V``/``F`` are written to a
     compressed ``.npz`` so a runaway patch can be investigated later (re-plot it
     offline). It never raises and never alters control flow — callers dump and
-    continue. Each ``(patch_id, tag)`` is dumped at most once per process.
+    continue; if the dump cannot be written, a message is printed instead. Each
+    ``(patch_id, tag)`` is dumped (or attempted) at most once per process.
 
     Parameters
     ----------
@@ -56,15 +52,23 @@ def dump_oversized_patch_state(V, F, tag="", threshold=None):
     _oversized_dumped_keys.add(key)
 
     out_dir = config.oversized_dump_dir
-    os.makedirs(out_dir, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"patch_{patch_id}_{tag}_{nv}v_{stamp}"
-    npz_path = os.path.join(out_dir, base + ".npz")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = f"patch_{patch_id}_{tag}_{nv}v_{stamp}"
+        npz_path = os.path.join(out_dir, base + ".npz")
 
-    V_arr = np.asarray(V, dtype=float)
-    F_arr = np.asarray(F, dtype=np.int64)
-    np.savez_compressed(npz_path, V=V_arr, F=F_arr,
-                        patch_id=str(patch_id), nv=nv, tag=str(tag))
+        V_arr = np.asarray(V, dtype=float)
+        F_arr = np.asarray(F, dtype=np.int64)
+        np.savez_compressed(npz_path, V=V_arr, F=F_arr,
+                            patch_id=str(patch_id), nv=nv, tag=str(tag))
+    except TimeoutError:  # alarm_timeout's, which mmg_remesh can be running under
+        raise
+    except Exception as e:
+        print_with_time(
+            f"[OVERSIZED PATCH] patch {patch_id} ({tag}) reached {nv} vertices "
+            f">= threshold {thr}; could not dump state to {out_dir}: {e}")
+        return False
     print_with_time(
         f"[OVERSIZED PATCH] patch {patch_id} ({tag}) reached {nv} vertices "
         f">= threshold {thr}; dumped state -> {npz_path}")
@@ -204,10 +208,13 @@ class ResultLog:
         self._save()
 
     def _update_memory(self):
+        # Peak resident memory of the largest process: this one or a finished child. The faces are meshed in
+        # worker processes, which RUSAGE_SELF leaves out. Not recorded on Windows (no resource module).
         try:
             import resource
             import platform
-            usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            usage = max(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                        resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
             if platform.system() == "Darwin":
                 mem_mb = usage / (1024 * 1024)
             else:
@@ -218,6 +225,17 @@ class ResultLog:
             pass
 
     def _save(self):
+        # Write to a temp file in the same directory, then rename over the log, so an
+        # interrupted write never leaves a truncated result.json.
         self._update_memory()
-        with open(self.path, "w") as f:
-            json.dump(self.data, f, indent=2)
+        tmp_path = f"{self.path}.{os.getpid()}.tmp"
+        try:
+            with open(tmp_path, "w") as f:
+                json.dump(self.data, f, indent=2)
+            os.replace(tmp_path, self.path)
+        except BaseException:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise

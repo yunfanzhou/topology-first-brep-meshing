@@ -1,3 +1,22 @@
+"""
+Per-triangle mesh quality metrics for remeshed outputs (or input meshes).
+
+Layout expected:
+    <results_path>/<mesh_id>/remeshed.vtu        (default)
+    <results_path>/<mesh_id>/mesh.msh            (used with --before)
+
+Writes a CSV with one row per triangle: mesh_id, min_angle, radius_ratio.
+Also writes a sibling <stem>_counts.csv with one row per mesh:
+    mesh_id, num_vertices, num_faces
+
+Single-folder mode is auto-detected when -i contains the target mesh
+(remeshed.vtu, or mesh.msh with --before) directly.
+
+Examples:
+    python get_metrics.py -i /path/to/results -o metrics.csv --sample 500 -j 8
+    python get_metrics.py -i /path/to/results --before -o metrics_before.csv
+    python get_metrics.py -i /path/to/<mesh_id> -o /path/to/<mesh_id>/metrics.csv
+"""
 import argparse
 import os
 import random
@@ -9,27 +28,6 @@ import igl
 import meshio
 import numpy as np
 import pandas as pd
-
-"""
-Per-triangle mesh quality metrics for remeshed outputs (or input meshes).
-
-Layout expected:
-    <results_path>/<mesh_id>/remeshed.vtu        (default)
-    <results_path>/<mesh_id>/mesh.msh            (used with --before)
-
-Writes a CSV with one row per triangle: mesh_id, min_angle, radius_ratio.
-Also writes a sibling <stem>_counts.csv with one row per mesh:
-    mesh_id, num_vertices, num_faces
-Use plot_metrics.py to plot histograms from either CSV.
-
-Single-folder mode is auto-detected when -i contains the target mesh
-(remeshed.vtu, or mesh.msh with --before) directly.
-
-Examples:
-    python get_metrics.py -i /path/to/results -o metrics.csv --sample 500 -j 8
-    python get_metrics.py -i /path/to/results --before -o metrics_before.csv
-    python get_metrics.py -i /path/to/<mesh_id> -o /path/to/<mesh_id>/metrics.csv
-"""
 
 
 def load_triangles(mesh_path):
