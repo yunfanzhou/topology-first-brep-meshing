@@ -1,15 +1,17 @@
 """Remeshing stage: remeshes the forward stage's fused.pkl with wildmeshing-toolkit's isotropic remeshing.
 
-usage: python remeshing/remesh.py <output_folder> [--len_rel L] [--cleanup_angle 0] [--threads 0]
+usage: python remeshing/remesh.py <output_folder> [--len_rel 0.05] [--cleanup_angle 0] [--threads 0]
 
 <output_folder> is the folder main.py wrote fused.pkl into. Runs the isotropic remeshing of the
 wildmeshing package (requirements.txt) in memory on the fused mesh with its patch ids, its feature
 chains and its corners, which it keeps, and writes remeshed.vtu, remeshed_edges.vtu and
 remeshed_report.json (see README).
-By default no target edge length is given and the remeshing uses the average edge length of the fused
-mesh, so it keeps the forward mesh's resolution. --len_rel L sets the target to L times the bounding box
-diagonal instead (0.05, the value of the paper's experiments, coarsens it). It is independent of the
-forward stage's --error_rel, which is a geometric error, not a length.
+--len_rel L is the target edge length, L times the bounding box diagonal (default 0.05, the value of the
+paper's experiments). It is independent of the forward stage's --error_rel, which is a geometric error,
+not a length. With --len_rel 0 no target is given and the remeshing uses the average edge length of the
+fused mesh. That average is far below what the large faces need (the forward mesh is much finer near the
+features), so it refines: on assemblies the meshes grew 2 to 4 times and the remeshing took up to an hour
+or more.
 --cleanup_angle A repairs, after every iteration, the triangles whose smallest angle is under A degrees
 (collapse, swap or vertex move). It is off by default (0): it runs serially over most of the mesh while
 a fine forward mesh is coarsened, and took 97% of the remeshing time (20 min of 20.5) on a 517k-triangle
@@ -74,8 +76,8 @@ def remesh(V, F, patch, edge2chain, corner2vid, len_rel=None, threads=0, cleanup
         "input": "surface",
         "features": "features",
         "feature_fields": ["patch_id"],  # carried to every remeshed triangle
-        # no target given: negative, and the remeshing takes the input's average edge length
-        "length_rel": -1.0 if len_rel is None else len_rel,
+        # no target (None, 0 or negative): negative, and the remeshing takes the input's average edge length
+        "length_rel": len_rel if len_rel is not None and len_rel > 0 else -1.0,
         "eps_rel": eps_rel,
         "use_sample_envelope": True,
         "max_iterations": 3,
@@ -98,9 +100,9 @@ def remesh(V, F, patch, edge2chain, corner2vid, len_rel=None, threads=0, cleanup
 def main():
     parser = argparse.ArgumentParser(description="Remesh the forward stage output with wildmeshing-toolkit.")
     parser.add_argument("output_folder", type=str, help="Folder containing fused.pkl from main.py")
-    parser.add_argument("--len_rel", type=float, default=None,
-                        help="Target edge length relative to the bounding box diagonal (default: none given, "
-                             "the remeshing uses the average edge length of the fused mesh)")
+    parser.add_argument("--len_rel", type=float, default=0.05,
+                        help="Target edge length relative to the bounding box diagonal (default: 0.05). "
+                             "0: no target, the remeshing uses the average edge length of the fused mesh")
     parser.add_argument("--cleanup_angle", type=float, default=0.0,
                         help="Repair, after every iteration, the triangles whose smallest angle is under this "
                              "many degrees (default: 0, no repair; the repair is slow on fine forward meshes)")

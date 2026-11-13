@@ -74,12 +74,13 @@ def test_triangle_repair_is_off_unless_asked(tmp_path, monkeypatch):
     assert remesh(V, F, patch, edges, corners, 0.1, cleanup_angle=40.0)[-1]["cleanup_angle"] == 40.0
 
 
-def test_default_target_is_the_input_average_edge_length(tmp_path, monkeypatch):
-    """Without a target length the remeshing uses the average edge length of its input."""
+def test_no_target_length_means_the_input_average_edge_length(tmp_path, monkeypatch):
+    """Without a target length (None, or --len_rel 0) the remeshing uses the average edge length of its input."""
     monkeypatch.chdir(tmp_path)
     V, F, patch, edges, corners = cube(8)
     E = np.unique(np.sort(np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]]), axis=1), axis=0)
     average = np.linalg.norm(V[E[:, 0]] - V[E[:, 1]], axis=1).mean()
     assert remesh(V, F, patch, edges, corners)[-1]["target_length"] == pytest.approx(average)
+    assert remesh(V, F, patch, edges, corners, 0.0)[-1]["target_length"] == pytest.approx(average)
     diag = np.linalg.norm(V.max(axis=0) - V.min(axis=0))
     assert remesh(V, F, patch, edges, corners, 0.1)[-1]["target_length"] == pytest.approx(0.1 * diag)
