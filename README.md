@@ -87,6 +87,19 @@ angle is under A degrees (wildmeshing-toolkit's `cleanup_angle`). It is off by d
 serial and, while a fine forward mesh is coarsened, visits most of the mesh, which made the remeshing 20
 to over 100 times slower on assemblies of 0.5 to 4 million forward triangles.
 
+`data/models/` has 35 larger test models: 27 from the ABC dataset, 4 assemblies from the Fusion 360 Gallery
+assembly dataset and 4 toy models (sources and sizes in `data/models/README.md`; they are under their
+datasets' terms, not this repository's license). To run both stages and the topology check on all of
+them, with the default `--error_rel` and `--len_rel`:
+
+```
+python run_models.py                 # data/models -> out_models/<model>
+python run_models.py data/simple out  # or any folder of .hdf5 models
+```
+
+It prints one line per model and how many pass. All 35 pass on macOS (arm64); together they take about
+10 minutes, most of it on `00001269`, whose forward mesh has 3 million triangles.
+
 `main.py` meshes the faces in parallel, one process per CPU by default; `--workers N` sets the number of
 processes (`--workers 1` runs serially). The output is the same for any number of workers.
 

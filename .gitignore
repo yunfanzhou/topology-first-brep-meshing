@@ -16,12 +16,14 @@ metaprogramming/
 
 # outputs of the README commands and the oversized-patch guard
 out/
+out_models/
 oversized_patch_dumps/
 __pycache__/
 .pytest_cache/
 
 # example inputs
 !data/simple/*.hdf5
+!data/models/*.hdf5
 
 # packaging files that the patterns above would skip
 !requirements.txt
